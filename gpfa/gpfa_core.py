@@ -22,7 +22,7 @@ from . import gpfa_util
 
 
 def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
-        em_max_iters=500, tau_init=100.0, eps_init=1.0E-3, freq_ll=5,
+        em_max_iters=1000, tau_init=100.0, eps_init=1.0E-3, freq_ll=5,
         verbose=False):
     """
     Fit the GPFA model with the given training data.
@@ -134,7 +134,6 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
     # Fit model parameters
     # =====================
     print('\nFitting GPFA model...')
-    print(params_init)
     params_est, seqs_train_cut, ll_cut, iter_time = em(
         params_init, seqs_train_cut, min_var_frac=min_var_frac,
         max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose)
