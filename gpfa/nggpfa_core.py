@@ -28,6 +28,8 @@ import sys
 def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
         em_max_iters=1000, tau_init=100.0, eps_init=1.0E-3, freq_ll=5,
         verbose=False, nggp_model = None, cnf = None):
+    print('xdim: ', x_dim)
+    print('bin width ', bin_width)
     # For compute efficiency, train on equal-length segments of trials
     seqs_train_cut = gpfa_util.cut_trials(seqs_train)
     if len(seqs_train_cut) == 0:
@@ -78,7 +80,7 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
 
     fit_info = {'iteration_time': iter_time, 'log_likelihoods': ll_cut}
 
-    return params_est, fit_info
+    return params_est, fit_info, cnf
 
 
 def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
@@ -91,12 +93,15 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
     iter_time = []
     var_floor = min_var_frac * np.diag(np.cov(np.hstack(seqs_train['y'])))
     seqs_latent = None
+    max_iters = 2
 
     
+    cnf_optimizer = torch.optim.Adam(cnf.parameters(), lr=.01)
 
     # Loop once for each iteration of EM algorithm
     for iter_id in trange(1, max_iters + 1, desc='EM iteration',
                           disable=not verbose):
+       
         if verbose:
             print()
         tic = time.time()
@@ -106,27 +111,16 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
         # Seq latent is 104 (neurons) by 20 (?bin size?)
         if not np.isnan(ll):
             ll_old = ll
-        seqs_latent, ll = exact_inference_with_ll(cnf,seqs_train, params,
-                                                  get_ll=get_ll)
+        seqs_latent, ll, cnf = exact_inference_with_ll(cnf,seqs_train, params,
+                                                  get_ll=True)
         lls.append(ll)
-        import torch
+        
+        cnf_optimizer.zero_grad()  # Reset gradients for CNF parameters
+        loss = torch.tensor(-ll, requires_grad=True)  # Example: using negative log-likelihood as loss; adjust as needed
+        loss.backward()  # Compute gradients
+        cnf_optimizer.step()
+        print( print(iter_id), ll)
 
-        # Assuming cnf_model is your CNF model instance
-        # and seqs_latent is the output from the GPFA model
-        for trial in seqs_latent:
-            # Extract the latent_variable for the trial
-            latent_var_np = trial['latent_variable']  # This is a NumPy array
-            
-            # Convert to PyTorch tensor
-            latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32)
-            
-            # Apply the CNF model
-            #transformed_latent_var, log_det_j = cnf(latent_var_tensor)
-            a = cnf(latent_var_tensor)
-  
-            # Optionally, update seqs_latent with the transformed latent variables
-            # Convert transformed_latent_var back to NumPy if needed and store it
-            trial['latent_variable_transformed'] = transformed_latent_var.detach().numpy()
 
 
         #tensor_seqs_latent = torch.tensor(seqs_latent)
@@ -305,13 +299,28 @@ def exact_inference_with_ll(cnf,seqs, params, get_ll=True):
                   - y_dim * t * np.log(2 * np.pi)
             ll = ll + len(n_list) * val - (rinv.dot(dif) * dif).sum() \
                 + (term1_mat.T.dot(minv) * term1_mat.T).sum()
+    print(np.shape(seqs_latent))
+    print('going into cnf transformation')
+    # Assuming cnf_model is your CNF model instance
+    # and seqs_latent is the output from the GPFA model
+    for i, trial in enumerate(seqs_latent):
+        # Extract the latent_variable for the trial
+        latent_var_np = trial['latent_variable']  # This is a NumPy array
+        
+        # Convert to PyTorch tensor
+        latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32)
+        # Apply the CNF model
+        print(np.shape(latent_var_tensor))
+        a = cnf(latent_var_tensor)
 
+    
+        # Directly update the 'latent_variable' in seqs_latent structured array
+        seqs_latent[i]['latent_variable'] = a.detach().cpu().numpy()
     if get_ll:
         ll /= 2
     else:
         ll = np.nan
-
-    return seqs_latent, ll
+    return seqs_latent, ll, cnf
 
 
 def learn_gp_params(seqs_latent, params, verbose=False):
