@@ -446,6 +446,7 @@ def exact_inference_with_ll(seqs, params, get_ll=True):
     else:
         ll = np.nan
 
+
     return seqs_latent, ll
 
 

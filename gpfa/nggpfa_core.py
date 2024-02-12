@@ -21,15 +21,92 @@ import torch
 
 from . import gpfa_util
 import sys
+from IPython.display import clear_output
+from tqdm.notebook import trange
+
 
 
 
 
 def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
         em_max_iters=1000, tau_init=100.0, eps_init=1.0E-3, freq_ll=5,
-        verbose=False, nggp_model = None, cnf = None):
-    print('xdim: ', x_dim)
-    print('bin width ', bin_width)
+        verbose=False, cnf = None, cnf_lr=.1,device='cpu'):
+    """
+    Fit the GPFA model with the given training data.
+
+    Parameters
+    ----------
+    seqs_train : np.recarray
+        training data structure, whose n-th element (corresponding to
+        the n-th experimental trial) has fields
+        T : int
+            number of bins
+        y : (#units, T) np.ndarray
+            neural data
+    x_dim : int, optional
+        state dimensionality
+        Default: 3
+    bin_width : float, optional
+        spike bin width in msec
+        Default: 20.0
+    min_var_frac : float, optional
+        fraction of overall data variance for each observed dimension to set as
+        the private variance floor.  This is used to combat Heywood cases,
+        where ML parameter learning returns one or more zero private variances.
+        Default: 0.01
+        (See Martin & McDonald, Psychometrika, Dec 1975.)
+    em_tol : float, optional
+        stopping criterion for EM
+        Default: 1e-8
+    em_max_iters : int, optional
+        number of EM iterations to run
+        Default: 500
+    tau_init : float, optional
+        GP timescale initialization in msec
+        Default: 100
+    eps_init : float, optional
+        GP noise variance initialization
+        Default: 1e-3
+    freq_ll : int, optional
+        data likelihood is computed at every freq_ll EM iterations. freq_ll = 1
+        means that data likelihood is computed at every iteration.
+        Default: 5
+    verbose : bool, optional
+        specifies whether to display status messages
+        Default: False
+    cnf: cnf, required
+        the cnf which will be trained during fitting
+    cnf_lr : float, option  
+        the learning rate for the cnf
+
+
+    Returns
+    -------
+    parameter_estimates : dict
+        Estimated model parameters.
+        When the GPFA method is used, following parameters are contained
+            covType: {'rbf', 'tri', 'logexp'}
+                type of GP covariance
+            gamma: np.ndarray of shape (1, #latent_vars)
+                related to GP timescales by 'bin_width / sqrt(gamma)'
+            eps: np.ndarray of shape (1, #latent_vars)
+                GP noise variances
+            d: np.ndarray of shape (#units, 1)
+                observation mean
+            C: np.ndarray of shape (#units, #latent_vars)
+                mapping between the neuronal data space and the latent variable
+                space
+            R: np.ndarray of shape (#units, #latent_vars)
+                observation noise covariance
+
+    fit_info : dict
+        Information of the fitting process and the parameters used there
+        iteration_time : list
+            containing the runtime for each iteration step in the EM algorithm.
+    
+    cnf : cnf
+        the trained CNF
+    """
     # For compute efficiency, train on equal-length segments of trials
     seqs_train_cut = gpfa_util.cut_trials(seqs_train)
     if len(seqs_train_cut) == 0:
@@ -57,11 +134,9 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
     fa = FactorAnalysis(n_components=x_dim, copy=True,
                         noise_variance_init=np.diag(np.cov(y_all, bias=True)))
     fa.fit(y_all.T)
-    # Y|X = N(Cx+d, R) defines the linear gaussian relationship between observed spike trains y and latent states x
     params_init['d'] = y_all.mean(axis=1)
     params_init['C'] = fa.components_.T
     params_init['R'] = np.diag(fa.noise_variance_)
-    # There should also be a gaussian process for each dimension of the state space x 1...p
 
     # Define parameter constraints
     params_init['notes'] = {
@@ -73,18 +148,93 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
     # =====================
     # Fit model parameters
     # =====================
-    print('\nFitting GPFA model with NGGP...')
-    params_est, seqs_train_cut, ll_cut, iter_time = em(
-    params_init, seqs_train_cut, min_var_frac=min_var_frac,
-    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnf=cnf)
+    print('\nFitting GPFA model with CNF...')
+    params_est, seqs_train_cut, ll_cut, iter_time, cnf = em(
+    params_init, seqs_train_cut, device,min_var_frac=min_var_frac,
+    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnf=cnf, cnf_lr=cnf_lr)
 
     fit_info = {'iteration_time': iter_time, 'log_likelihoods': ll_cut}
 
     return params_est, fit_info, cnf
 
 
-def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
-       freq_ll=5, verbose=False, cnf = None):
+def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0.01,
+       freq_ll=5, verbose=False, cnf = None, cnf_lr=.1):
+    """
+    Fits GPFA model parameters using expectation-maximization (EM) algorithm.
+
+    Parameters
+    ----------
+    params_init : dict
+        GPFA model parameters at which EM algorithm is initialized
+        covType : {'rbf', 'tri', 'logexp'}
+            type of GP covariance
+        gamma : np.ndarray of shape (1, #latent_vars)
+            related to GP timescales by
+            'bin_width / sqrt(gamma)'
+        eps : np.ndarray of shape (1, #latent_vars)
+            GP noise variances
+        d : np.ndarray of shape (#units, 1)
+            observation mean
+        C : np.ndarray of shape (#units, #latent_vars)
+            mapping between the neuronal data space and the
+            latent variable space
+        R : np.ndarray of shape (#units, #latent_vars)
+            observation noise covariance
+    seqs_train : np.recarray
+        training data structure, whose n-th entry (corresponding to the n-th
+        experimental trial) has fields
+        T : int
+            number of bins
+        y : np.ndarray (yDim x T)
+            neural data
+    max_iters : int, optional
+        number of EM iterations to run
+        Default: 500
+    tol : float, optional
+        stopping criterion for EM
+        Default: 1e-8
+    min_var_frac : float, optional
+        fraction of overall data variance for each observed dimension to set as
+        the private variance floor.  This is used to combat Heywood cases,
+        where ML parameter learning returns one or more zero private variances.
+        Default: 0.01
+        (See Martin & McDonald, Psychometrika, Dec 1975.)
+    freq_ll : int, optional
+        data likelihood is computed at every freq_ll EM iterations.
+        freq_ll = 1 means that data likelihood is computed at every
+        iteration.
+        Default: 5
+    verbose : bool, optional
+        specifies whether to display status messages
+        Default: False
+    cnf: cnf, required
+        the cnf which will be trained during fitting
+
+    Returns
+    -------
+    params_est : dict
+        GPFA model parameter estimates, returned by EM algorithm (same
+        format as params_init)
+    seqs_latent : np.recarray
+        a copy of the training data structure, augmented with the new
+        fields:
+        latent_variable : np.ndarray of shape (#latent_vars x #bins)
+            posterior mean of latent variables at each time bin
+        Vsm : np.ndarray of shape (#latent_vars, #latent_vars, #bins)
+            posterior covariance between latent variables at each
+            timepoint
+        VsmGP : np.ndarray of shape (#bins, #bins, #latent_vars)
+            posterior covariance over time for each latent
+            variable
+    ll : list
+        list of log likelihoods after each EM iteration
+    iter_time : list
+        lisf of computation times (in seconds) for each EM iteration
+    cnf : cnf
+        the trained CNF
+    """
+    
     params = params_init
     t = seqs_train['T']
     y_dim, x_dim = params['C'].shape
@@ -93,11 +243,10 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
     iter_time = []
     var_floor = min_var_frac * np.diag(np.cov(np.hstack(seqs_train['y'])))
     seqs_latent = None
-    max_iters = 2
 
-    
-    cnf_optimizer = torch.optim.Adam(cnf.parameters(), lr=.01)
-
+    # CNF optimizer using ADAM (this can be changed)
+    cnf_optimizer = torch.optim.Adam(cnf.parameters(), lr=cnf_lr)
+    cnf_iters = 20
     # Loop once for each iteration of EM algorithm
     for iter_id in trange(1, max_iters + 1, desc='EM iteration',
                           disable=not verbose):
@@ -105,39 +254,22 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
         if verbose:
             print()
         tic = time.time()
-        get_ll = (np.fmod(iter_id, freq_ll) == 0) or (iter_id <= 2)
 
         # ==== E STEP =====
-        # Seq latent is 104 (neurons) by 20 (?bin size?)
         if not np.isnan(ll):
             ll_old = ll
-        seqs_latent, ll, cnf = exact_inference_with_ll(cnf,seqs_train, params,
-                                                  get_ll=True)
+        cnf_optimizer.zero_grad()
+        seqs_latent, ll, cnf, delta_log_p = exact_inference_with_ll(cnf,seqs_train, params, device)
         lls.append(ll)
         
-        cnf_optimizer.zero_grad()  # Reset gradients for CNF parameters
-        loss = torch.tensor(-ll, requires_grad=True)  # Example: using negative log-likelihood as loss; adjust as needed
+          # Reset gradients for CNF parameters
+        loss = torch.tensor(-ll, requires_grad=True) + torch.mean(delta_log_p)# using negative log-likelihood as loss
+        clip_value = 1.0
+        torch.nn.utils.clip_grad_norm_(cnf.parameters(), clip_value)
+    
+        cnf_optimizer.step()
         loss.backward()  # Compute gradients
         cnf_optimizer.step()
-        print( print(iter_id), ll)
-
-
-
-        #tensor_seqs_latent = torch.tensor(seqs_latent)
-        #z_transformed, log_det_j = cnf(tensor_seqs_latent)
-        #print(z_transformed)
-
-        #cnf(labels, torch.zeros(labels.size(0), 1).to(labels))
-
-        #for seq in seqs_latent:
-            #latent_vars = torch.tensor(seq['latent_variable'], dtype=torch.float32)
-            #context = []
-            # Apply the CNF flow to the latent variables
-            #delta_log_py, _, transformed_latent_vars = apply_flow(cnf = cnf, z = context, labels =  seq)
-
-            # Store the transformed latent variables and any additional output
-            #seq['transformed_latent_variable'] = transformed_latent_vars.detach().numpy()
-           # seq['delta_log_py'] = delta_log_py.detach().numpy()
 
 
         # ==== M STEP ====
@@ -193,6 +325,8 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
         iter_time.append(t_end)
 
         # Verify that likelihood is growing monotonically
+        if iter_id % freq_ll:
+            print('Iter ID: ',iter_id, 'Log Likelihood: ', ll)
         if iter_id <= 2:
             ll_base = ll
         elif verbose and ll < ll_old:
@@ -200,6 +334,7 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
                   'from {0} to {1}'.format(ll_old, ll))
         elif (ll - ll_base) < (1 + tol) * (ll_old - ll_base):
             break
+
 
     if len(lls) < max_iters:
         print('Fitting has converged after {0} EM iterations.)'.format(
@@ -209,12 +344,55 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
         warnings.warn('Private variance floor used for one or more observed '
                       'dimensions in GPFA.')
 
-    return params, seqs_latent, lls, iter_time
+    return params, seqs_latent, lls, iter_time, cnf
 
 
 
-def exact_inference_with_ll(cnf,seqs, params, get_ll=True):
+def exact_inference_with_ll(cnf,seqs, params,device):
+    """
+    Extracts latent trajectories from neural data, given GPFA model parameters.
 
+    Parameters
+    ----------
+    cnf: cnf, required
+        the cnf which will be trained during fitting
+    seqs : np.recarray
+        Input data structure, whose n-th element (corresponding to the n-th
+        experimental trial) has fields:
+        y : np.ndarray of shape (#units, #bins)
+            neural data
+        T : int
+            number of bins
+    params : dict
+        GPFA model parameters whe the following fields:
+        C : np.ndarray
+            FA factor loadings matrix
+        d : np.ndarray
+            FA mean vector
+        R : np.ndarray
+            FA noise covariance matrix
+        gamma : np.ndarray
+            GP timescale
+        eps : np.ndarray
+            GP noise variance
+   
+
+    Returns
+    -------
+    seqs_latent : np.recarray
+        a copy of the input data structure, augmented with the new
+        fields:
+        latent_variable :  (#latent_vars, #bins) np.ndarray
+              posterior mean of latent variables at each time bin
+        Vsm :  (#latent_vars, #latent_vars, #bins) np.ndarray
+              posterior covariance between latent variables at each
+              timepoint
+        VsmGP :  (#bins, #bins, #latent_vars) np.ndarray
+                posterior covariance over time for each latent
+                variable
+    ll : float
+        data log likelihood
+    """
     y_dim, x_dim = params['C'].shape
     # copy the contents of the input data structure to output structure
     dtype_out = [(x, seqs[x].dtype) for x in seqs.dtype.names]
@@ -293,34 +471,55 @@ def exact_inference_with_ll(cnf,seqs, params, get_ll=True):
             seqs_latent[n]['Vsm'] = vsm
             seqs_latent[n]['VsmGP'] = vsm_gp
 
-        if get_ll:
-            # Compute data likelihood
-            val = -t * logdet_r - logdet_k_big - logdet_m \
-                  - y_dim * t * np.log(2 * np.pi)
-            ll = ll + len(n_list) * val - (rinv.dot(dif) * dif).sum() \
-                + (term1_mat.T.dot(minv) * term1_mat.T).sum()
-    print(np.shape(seqs_latent))
-    print('going into cnf transformation')
-    # Assuming cnf_model is your CNF model instance
-    # and seqs_latent is the output from the GPFA model
-    for i, trial in enumerate(seqs_latent):
+
+        val = -t * logdet_r - logdet_k_big - logdet_m \
+                - y_dim * t * np.log(2 * np.pi)
+        ll = ll + len(n_list) * val - (rinv.dot(dif) * dif).sum() \
+            + (term1_mat.T.dot(minv) * term1_mat.T).sum()
+
+    delta_log_py_list = []
+    print(device)
+    for i in trange(len(seqs_latent), desc="applying CNF to latent variables"):
         # Extract the latent_variable for the trial
-        latent_var_np = trial['latent_variable']  # This is a NumPy array
+        latent_var_np = seqs_latent[i]['latent_variable'].T  # This is a NumPy array
         
         # Convert to PyTorch tensor
-        latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32)
-        # Apply the CNF model
-        print(np.shape(latent_var_tensor))
-        a = cnf(latent_var_tensor)
+        latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32).to(device)
+        #latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32)
 
-    
+        # Apply the CNF model
+        #transformed_latent_var_tensor = cnf(latent_var_tensor)
+        delta_log_p, y, transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor)
         # Directly update the 'latent_variable' in seqs_latent structured array
-        seqs_latent[i]['latent_variable'] = a.detach().cpu().numpy()
-    if get_ll:
-        ll /= 2
-    else:
-        ll = np.nan
-    return seqs_latent, ll, cnf
+        #seqs_latent[i]['latent_variable'] = transformed_latent_var_tensor.detach().cpu().numpy().T
+        seqs_latent[i]['latent_variable'] = transformed_latent_var_tensor.detach().cpu().numpy().T
+        delta_log_py_list.append(delta_log_p)
+    delta_log_py = torch.stack(delta_log_py_list).mean()
+
+    # Assuming cnf can process batches and handle padding for variable-length sequences
+    """
+    Maybe Attempt some sort of batch processing for speedup later
+
+    {
+    print(np.shape(seqs_latent[0]['latent_variable']))
+    # Convert all trials to tensors, pad sequences to equal length, and stack them
+    latent_variables = [torch.tensor(trial['latent_variable'], dtype=torch.float32).T for trial in seqs_latent]
+    latent_variables_padded = torch.nn.utils.rnn.pad_sequence(latent_variables, batch_first=True)
+
+    # Apply CNF in a single batch operation
+    latent_variables_transformed = cnf(latent_variables_padded)
+
+    # Update seqs_latent with transformed latent variables
+    # Assuming we can handle the inverse of padding here
+    for i, trial in enumerate(seqs_latent):
+        original_length = trial['latent_variable'].shape[1]
+        transformed = latent_variables_transformed[i, :original_length].detach().cpu().numpy().T
+        seqs_latent[i]['latent_variable'] = transformed
+    }
+    """
+    ll /= 2
+
+    return seqs_latent, ll, cnf, delta_log_py``
 
 
 def learn_gp_params(seqs_latent, params, verbose=False):
@@ -374,11 +573,12 @@ def learn_gp_params(seqs_latent, params, verbose=False):
 
     return param_opt
 
-def apply_flow(cnf, labels, z, num_tasks = 1, use_conditional=False):
-
+def apply_flow(cnf, labels):
+    cnf.float()
     y, delta_log_py = cnf(labels, torch.zeros(labels.size(0), 1).to(labels))
     y = y.squeeze()
     return delta_log_py, labels, y
+    
 
 def orthonormalize(params_est, seqs):
     """
