@@ -420,7 +420,7 @@ class NGGPFA(sklearn.base.BaseEstimator):
         for seq in seqs:
             seq['y'] = seq['y'][self.has_spikes_bool, :]
         print('seqs2: ', np.shape(seqs))
-        seqs, ll, cnf, _ = nggpfa_core.exact_inference_with_ll(self.cnf,seqs,
+        seqs, ll, cnf = nggpfa_core.exact_inference_with_ll(self.cnf,seqs,
                                                      self.params_estimated,device=self.device)
         self.transform_info['log_likelihood'] = ll
         self.transform_info['num_bins'] = seqs['T']

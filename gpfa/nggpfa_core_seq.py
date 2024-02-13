@@ -477,7 +477,6 @@ def exact_inference_with_ll(cnf,seqs, params,device):
             + (term1_mat.T.dot(minv) * term1_mat.T).sum()
 
     delta_log_py_list = []
-    print(device)
     for i in trange(len(seqs_latent), desc="applying CNF to latent variables"):
         # Extract the latent_variable for the trial
         latent_var_np = seqs_latent[i]['latent_variable'].T  # This is a NumPy array

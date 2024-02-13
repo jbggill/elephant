@@ -259,12 +259,15 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
         if not np.isnan(ll):
             ll_old = ll
         cnf_optimizer.zero_grad()
-
+        seqs_latent, ll, cnf, delta_log_p = exact_inference_with_ll(cnf,seqs_train, params, device)
+        lls.append(ll)
+        
         cnf_optimizer.zero_grad()
         seqs_latent, ll, cnf = exact_inference_with_ll(cnf, seqs_train, params, device)
         lls.append(ll.item())  # Assuming ll is a tensor, use .item() to extract its scalar value for logging
-        loss = torch.tensor(ll, requires_grad=True)
 
+        # Assuming both ll and delta_log_p are tensors that retain gradient information
+        loss = -ll  # Formulate loss directly from tensors
         clip_value = 1.0
         # Apply gradients
         loss.backward()  # Compute gradients
@@ -348,14 +351,23 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
 
 
+from scipy import linalg, sparse
+import numpy as np
+import torch
+from torch.autograd import Variable
+
 def exact_inference_with_ll(cnf, seqs, params, device):
     y_dim, x_dim = params['C'].shape
+    # Initialize dtype_out with additional fields for CNF-transformed variables
     dtype_out = [(x, seqs[x].dtype) for x in seqs.dtype.names] + \
                 [('latent_variable', object), ('Vsm', object), ('VsmGP', object)]
     seqs_latent = np.empty(len(seqs), dtype=dtype_out)
     for dtype_name in seqs.dtype.names:
         seqs_latent[dtype_name] = seqs[dtype_name]
 
+    print(seqs)
+
+    # Pre-compute some constants
     if params['notes']['RforceDiagonal']:
         rinv = np.diag(1.0 / np.diag(params['R']))
         logdet_r = np.sum(np.log(np.diag(params['R'])))
@@ -370,12 +382,14 @@ def exact_inference_with_ll(cnf, seqs, params, device):
     t_uniq = np.unique(t_all)
     ll = 0.
 
+    # Loop through each unique time length
     for t in t_uniq:
         k_big, k_big_inv, logdet_k_big = gpfa_util.make_k_big(params, t)
         k_big = sparse.csr_matrix(k_big)
-        blah = [c_rinv_c for _ in range(t)]
-        c_rinv_c_big = linalg.block_diag(*blah)
+        c_rinv_c_big = linalg.block_diag(*[c_rinv_c for _ in range(t)])
         minv, logdet_m = gpfa_util.inv_persymm(k_big_inv + c_rinv_c_big, x_dim)
+
+        # Initialize matrices for posterior covariance
         vsm = np.full((x_dim, x_dim, t), np.nan)
         idx = np.arange(0, x_dim * t + 1, x_dim)
         for i in range(t):
@@ -384,41 +398,33 @@ def exact_inference_with_ll(cnf, seqs, params, device):
         for i in range(x_dim):
             vsm_gp[:, :, i] = minv[i::x_dim, i::x_dim]
 
+        # Find trials with current time length
         n_list = np.where(t_all == t)[0]
-        dif = np.hstack(seqs[n_list]['y']) - params['d'][:, np.newaxis]
-        term1_mat = c_rinv.dot(dif).reshape((x_dim * t, -1), order='F')
-
-        t_half = int(np.ceil(t / 2.0))
-        blk_prod = np.zeros((x_dim * t_half, x_dim * t))
-        idx = range(0, x_dim * t_half + 1, x_dim)
-        for i in range(t_half):
-            blk_prod[idx[i]:idx[i + 1], :] = c_rinv_c.dot(minv[idx[i]:idx[i + 1], :])
-        blk_prod = k_big[:x_dim * t_half, :].dot(gpfa_util.fill_persymm(np.eye(x_dim * t_half, x_dim * t) - blk_prod, x_dim, t))
-        latent_variable_mat = gpfa_util.fill_persymm(blk_prod, x_dim, t).dot(term1_mat)
-        delta_log_py_list = []
+        # Compute the difference between observed data and mean
+        dif = np.hstack(seqs_latent[n_list]['y']) - params['d'][:, np.newaxis]
+        
+        # Transform latent variables and update 'dif' based on CNF-transformed variables
         for i, n in enumerate(n_list):
-            latent_var_np = latent_variable_mat[:, i].reshape((x_dim, t), order='F')
+            print(seqs_latent[n]['latent_variable'])
+            latent_var_np = seqs_latent[n]['latent_variable'].reshape(-1, x_dim * t)  # Reshape for CNF
             latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32).to(device)
-            delta_log_p, _, transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor.T)
-            seqs_latent[n]['latent_variable'] = transformed_latent_var_tensor.detach().cpu().numpy().T
-            seqs_latent[n]['Vsm'] = vsm
-            seqs_latent[n]['VsmGP'] = vsm_gp
-            delta_log_py_list.append(delta_log_p)
-
-
-            transformed_dif = seqs_latent[n]['y'] - (params['C'] @ seqs_latent[n]['latent_variable'] + params['d'][:, np.newaxis])
+            delta_log_p, _, transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor)
+            transformed_latent_variables = transformed_latent_var_tensor.detach().cpu().numpy().reshape(x_dim, t)
+            
+            # Update latent_variable with CNF-transformed variables
+            seqs_latent[n]['latent_variable'] = transformed_latent_variables
+            
+            # Recalculate 'dif' based on transformed latent variables for LL calculation
+            transformed_dif = seqs_latent[n]['y'] - (params['C'] @ transformed_latent_variables + params['d'][:, np.newaxis])
             
             # Update LL with transformed 'dif'
             val = -t * logdet_r - logdet_k_big - logdet_m - y_dim * t * np.log(2 * np.pi)
             ll += len(n_list) * val - (rinv.dot(transformed_dif) * transformed_dif).sum()
-        delta_log_py = torch.stack(delta_log_py_list).mean()
-        #val = -t * logdet_r - logdet_k_big - logdet_m - y_dim * t * np.log(2 * np.pi)
- 
-
-       # ll += len(n_list) * val - (rinv.dot(dif) * dif).sum() + (term1_mat.T.dot(minv) * term1_mat.T).sum()
+            
+            # Incorporate delta_log_p into LL
+            ll += delta_log_p.sum().item()
 
     return seqs_latent, ll, cnf
-
 
 
 
