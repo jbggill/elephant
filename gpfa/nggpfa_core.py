@@ -559,7 +559,7 @@ def setup_flow(device, params, context_dim):
 import os
 import matplotlib.pyplot as plt
 
-def save_gpfa_confidence_intervals(seqs_latent, iteration, save_dir='gpfa_plots'):
+def save_gpfa_confidence_intervals(seqs_latent, iteration, save_dir='nggpfa_plots'):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     

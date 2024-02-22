@@ -238,6 +238,8 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
         seqs_latent, ll = exact_inference_with_ll(seqs_train, params,
                                                   get_ll=get_ll)
         lls.append(ll)
+        if iter_id==3:
+            save_gpfa_confidence_intervals(seq_latent,3)
 
         # ==== M STEP ====
         sum_p_auto = np.zeros((x_dim, x_dim))
@@ -563,3 +565,32 @@ def orthonormalize(params_est, seqs):
     params_est['Corth'] = Corth
 
     return Corth, seqs
+import os
+import matplotlib.pyplot as plt
+def save_gpfa_confidence_intervals(seqs_latent, iteration, save_dir='gpfa_plots'):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    print(seqs_latent)
+    for trial_idx, trial_data in enumerate(seqs_latent):
+        print(trial_data)
+        # Assuming each trial_data contains means and variances for each latent variable
+        for latent_variable_idx in range(trial_data['latent_variable'].shape[0]):
+            means = trial_data['latent_variable'][latent_variable_idx, :]
+            variances = trial_data['Vsm'][latent_variable_idx, latent_variable_idx, :]  # Diagonal for each latent variable
+            std_devs = np.sqrt(variances)
+            
+            # Ensure broadcasting is feasible by matching shapes
+            # This assumes means and std_devs are now aligned
+            lower_bounds = means - 1.96 * std_devs
+            upper_bounds = means + 1.96 * std_devs
+            time_points = np.arange(means.shape[0])
+            
+            plt.fill_between(time_points, lower_bounds, upper_bounds, color='skyblue', alpha=0.4)
+            plt.plot(time_points, means, label=f'Latent Variable {latent_variable_idx+1}')
+            
+            plt.xlabel('Time Points')
+            plt.ylabel('Latent Variable Value')
+            plt.title(f'GPFA Latent Variable Trajectory with 95% Confidence Interval\nIteration {iteration}, Trial {trial_idx+1}, {np.shape(variances)}')
+            file_name = f'Normal_Iteration_{iteration}_Trial_{trial_idx+1}_Latent_{latent_variable_idx+1}.png'
+            plt.savefig(os.path.join(save_dir, file_name))
+            plt.close()  # Close the plot to free up memory
