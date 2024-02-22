@@ -261,15 +261,17 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
         cnf_optimizer.zero_grad()
 
         cnf_optimizer.zero_grad()
-        seqs_latent, ll, cnf = exact_inference_with_ll(cnf, seqs_train, params, device)
+        seqs_latent, ll, cnf, delta_log_p = exact_inference_with_ll(cnf, seqs_train, params, device)
         lls.append(ll.item())  # Assuming ll is a tensor, use .item() to extract its scalar value for logging
-        loss = torch.tensor(ll, requires_grad=True)
+        loss = torch.tensor(ll, requires_grad=True) +  delta_log_p # plus or minus im not sure
 
         clip_value = 1.0
         # Apply gradients
         loss.backward()  # Compute gradients
         torch.nn.utils.clip_grad_norm_(cnf.parameters(), clip_value)
         cnf_optimizer.step()  # Update CNF parameters based on gradients
+        if iter_id % 3 == 0:
+            save_gpfa_confidence_intervals(seqs_latent, iter_id)
 
 
         # ==== M STEP ====
@@ -410,14 +412,14 @@ def exact_inference_with_ll(cnf, seqs, params, device):
             
             # Update LL with transformed 'dif'
             val = -t * logdet_r - logdet_k_big - logdet_m - y_dim * t * np.log(2 * np.pi)
-            ll += len(n_list) * val - (rinv.dot(transformed_dif) * transformed_dif).sum()
+            ll += len(n_list) * val - (rinv.dot(transformed_dif) * transformed_dif).sum() + (term1_mat.T.dot(minv) * term1_mat.T).sum()
         delta_log_py = torch.stack(delta_log_py_list).mean()
         #val = -t * logdet_r - logdet_k_big - logdet_m - y_dim * t * np.log(2 * np.pi)
  
 
        # ll += len(n_list) * val - (rinv.dot(dif) * dif).sum() + (term1_mat.T.dot(minv) * term1_mat.T).sum()
 
-    return seqs_latent, ll, cnf
+    return seqs_latent, ll, cnf, delta_log_py
 
 
 
@@ -553,3 +555,33 @@ def setup_flow(device, params, context_dim):
         add_spectral_norm(cnf)
     set_cnf_options(params, cnf)
     return cnf
+
+import os
+import matplotlib.pyplot as plt
+
+def save_gpfa_confidence_intervals(seqs_latent, iteration, save_dir='gpfa_plots'):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
+    for trial_idx, trial_data in enumerate(seqs_latent):
+        # Assuming each trial_data contains means and variances for each latent variable
+        for latent_variable_idx in range(trial_data['latent_variable'].shape[0]):
+            means = trial_data['latent_variable'][latent_variable_idx, :]
+            variances = trial_data['Vsm'][latent_variable_idx, latent_variable_idx, :]  # Diagonal for each latent variable
+            std_devs = np.sqrt(variances)
+            
+            # Ensure broadcasting is feasible by matching shapes
+            # This assumes means and std_devs are now aligned
+            lower_bounds = means - 1.96 * std_devs
+            upper_bounds = means + 1.96 * std_devs
+            time_points = np.arange(means.shape[0])
+            
+            plt.fill_between(time_points, lower_bounds, upper_bounds, color='skyblue', alpha=0.4)
+            plt.plot(time_points, means, label=f'Latent Variable {latent_variable_idx+1}')
+            
+            plt.xlabel('Time Points')
+            plt.ylabel('Latent Variable Value')
+            plt.title(f'GPFA Latent Variable Trajectory with 95% Confidence Interval\nIteration {iteration}, Trial {trial_idx+1}, {np.shape(variances)}')
+            file_name = f'Iteration_{iteration}_Trial_{trial_idx+1}_Latent_{latent_variable_idx+1}.png'
+            plt.savefig(os.path.join(save_dir, file_name))
+            plt.close()  # Close the plot to free up memory
