@@ -178,7 +178,7 @@ class NGGPFA(sklearn.base.BaseEstimator):
 
     def __init__(self, bin_size=20 * pq.ms, x_dim=3, min_var_frac=0.01,
                  tau_init=100.0 * pq.ms, eps_init=1.0E-3, em_tol=1.0E-8,
-                 em_max_iters=500, freq_ll=5, verbose=False, cnf_lr = .01,device='cpu'):
+                 em_max_iters=500, freq_ll=5, verbose=False, cnf_lr = .01,device='cpu',convergence=True):
         # Initialize object
         self.bin_size = bin_size
         self.x_dim = x_dim
@@ -197,6 +197,7 @@ class NGGPFA(sklearn.base.BaseEstimator):
         self.verbose = verbose
         self.cnf_lr = cnf_lr
         self.device=device
+        self.convergence=convergence
 
 
         if not isinstance(self.bin_size, pq.Quantity):
@@ -307,7 +308,8 @@ class NGGPFA(sklearn.base.BaseEstimator):
             verbose=self.verbose,
             cnf = self.cnf,
             cnf_lr = self.cnf_lr, 
-            device=self.device
+            device=self.device,
+            convergence=self.convergence
             )
  
 

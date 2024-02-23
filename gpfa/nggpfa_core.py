@@ -30,7 +30,7 @@ from tqdm.notebook import trange
 
 def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
         em_max_iters=1000, tau_init=100.0, eps_init=1.0E-3, freq_ll=5,
-        verbose=False, cnf = None, cnf_lr=.1,device='cpu'):
+        verbose=False, cnf = None, cnf_lr=.1,device='cpu',convergence=True):
     """
     Fit the GPFA model with the given training data.
 
@@ -151,7 +151,7 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
     print('\nFitting GPFA model with CNF...')
     params_est, seqs_train_cut, ll_cut, iter_time, cnf = em(
     params_init, seqs_train_cut, device,min_var_frac=min_var_frac,
-    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnf=cnf, cnf_lr=cnf_lr)
+    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnf=cnf, cnf_lr=cnf_lr,convergence=convergence)
 
     fit_info = {'iteration_time': iter_time, 'log_likelihoods': ll_cut}
 
@@ -159,7 +159,7 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
 
 
 def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0.01,
-       freq_ll=5, verbose=False, cnf = None, cnf_lr=.1):
+       freq_ll=5, verbose=False, cnf = None, cnf_lr=.1,convergence=False):
     """
     Fits GPFA model parameters using expectation-maximization (EM) algorithm.
 
@@ -246,7 +246,7 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
     # CNF optimizer using ADAM (this can be changed)
     cnf_optimizer = torch.optim.Adam(cnf.parameters(), lr=cnf_lr)
-    cnf_iters = 20
+
     # Loop once for each iteration of EM algorithm
     for iter_id in trange(1, max_iters + 1, desc='EM iteration',
                           disable=not verbose):
@@ -258,20 +258,22 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
         # ==== E STEP =====
         if not np.isnan(ll):
             ll_old = ll
-        cnf_optimizer.zero_grad()
 
         cnf_optimizer.zero_grad()
         seqs_latent, ll, cnf, delta_log_p = exact_inference_with_ll(cnf, seqs_train, params, device)
         lls.append(ll.item())  # Assuming ll is a tensor, use .item() to extract its scalar value for logging
-        loss = torch.tensor(ll, requires_grad=True) +  delta_log_p # plus or minus im not sure
+        loss = torch.tensor(-ll, requires_grad=True) +  delta_log_p
 
         clip_value = 1.0
         # Apply gradients
-        loss.backward()  # Compute gradients
-        torch.nn.utils.clip_grad_norm_(cnf.parameters(), clip_value)
-        cnf_optimizer.step()  # Update CNF parameters based on gradients
-        if iter_id % 3 == 0:
+
+        loss.backward()
+        cnf_optimizer.step()
+        if iter_id % 1 == 0:
             save_gpfa_confidence_intervals(seqs_latent, iter_id)
+            plot_cnf_loss(lls,iter_id)
+            transform_and_plot_linear_gaussian(cnf,iter_id)
+#            plot_and_save_vector_field(cnf)
 
 
         # ==== M STEP ====
@@ -329,12 +331,12 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
         # Verify that likelihood is growing monotonically
         if iter_id % freq_ll:
             print('Iter ID: ',iter_id, 'Log Likelihood: ', ll)
-        if iter_id <= 2:
+        if iter_id <= 10:
             ll_base = ll
         elif verbose and ll < ll_old:
             print('\nError: Data likelihood has decreased ',
                   'from {0} to {1}'.format(ll_old, ll))
-        elif (ll - ll_base) < (1 + tol) * (ll_old - ll_base):
+        elif (ll - ll_base) < (1 + tol) * (ll_old - ll_base) and convergence:
             break
 
 
@@ -401,7 +403,7 @@ def exact_inference_with_ll(cnf, seqs, params, device):
         for i, n in enumerate(n_list):
             latent_var_np = latent_variable_mat[:, i].reshape((x_dim, t), order='F')
             latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32).to(device)
-            delta_log_p, _, transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor.T)
+            delta_log_p, _, transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor.T, reverse=True)
             seqs_latent[n]['latent_variable'] = transformed_latent_var_tensor.detach().cpu().numpy().T
             seqs_latent[n]['Vsm'] = vsm
             seqs_latent[n]['VsmGP'] = vsm_gp
@@ -475,9 +477,9 @@ def learn_gp_params(seqs_latent, params, verbose=False):
 
     return param_opt
 
-def apply_flow(cnf, labels):
+def apply_flow(cnf, labels,reverse=False):
     cnf.float()
-    y, delta_log_py = cnf(labels, torch.zeros(labels.size(0), 1).to(labels))
+    y, delta_log_py = cnf(labels, torch.zeros(labels.size(0), 1).to(labels),reverse=reverse )
     y = y.squeeze()
     return delta_log_py, labels, y
     
@@ -559,29 +561,153 @@ def setup_flow(device, params, context_dim):
 import os
 import matplotlib.pyplot as plt
 
-def save_gpfa_confidence_intervals(seqs_latent, iteration, save_dir='nggpfa_plots'):
+import numpy as np
+import matplotlib.pyplot as plt
+import os
+
+def save_gpfa_confidence_intervals(seqs_latent, iteration, save_dir='nggpfa_plots/confidence'):
+    """
+    Save confidence interval plots for each latent variable at a specified iteration.
+
+    Parameters:
+    - seqs_latent: The output from the GPFA fitting process, containing latent variables and their variances.
+    - iteration: The current iteration number of the fitting process.
+    - save_dir: The directory where plots will be saved.
+    """
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     
-    for trial_idx, trial_data in enumerate(seqs_latent):
-        # Assuming each trial_data contains means and variances for each latent variable
-        for latent_variable_idx in range(trial_data['latent_variable'].shape[0]):
+    # Determine number of latent variables and time points (assuming consistent across trials)
+    num_latent_vars = seqs_latent[0]['latent_variable'].shape[0]
+    num_time_points = seqs_latent[0]['latent_variable'].shape[1]
+
+    for latent_variable_idx in range(num_latent_vars):
+        aggregated_means = np.zeros(num_time_points)
+        aggregated_variances = np.zeros(num_time_points)
+        
+        # Aggregate data across trials for the current latent variable
+        for trial_data in seqs_latent:
             means = trial_data['latent_variable'][latent_variable_idx, :]
-            variances = trial_data['Vsm'][latent_variable_idx, latent_variable_idx, :]  # Diagonal for each latent variable
-            std_devs = np.sqrt(variances)
-            
-            # Ensure broadcasting is feasible by matching shapes
-            # This assumes means and std_devs are now aligned
-            lower_bounds = means - 1.96 * std_devs
-            upper_bounds = means + 1.96 * std_devs
-            time_points = np.arange(means.shape[0])
-            
-            plt.fill_between(time_points, lower_bounds, upper_bounds, color='skyblue', alpha=0.4)
-            plt.plot(time_points, means, label=f'Latent Variable {latent_variable_idx+1}')
-            
-            plt.xlabel('Time Points')
-            plt.ylabel('Latent Variable Value')
-            plt.title(f'GPFA Latent Variable Trajectory with 95% Confidence Interval\nIteration {iteration}, Trial {trial_idx+1}, {np.shape(variances)}')
-            file_name = f'Iteration_{iteration}_Trial_{trial_idx+1}_Latent_{latent_variable_idx+1}.png'
-            plt.savefig(os.path.join(save_dir, file_name))
-            plt.close()  # Close the plot to free up memory
+            variances = trial_data['Vsm'][latent_variable_idx, latent_variable_idx, :]
+            aggregated_means += means
+            aggregated_variances += variances
+        
+        # Averaging across trials
+        aggregated_means /= len(seqs_latent)
+        aggregated_variances /= len(seqs_latent)
+        std_devs = np.sqrt(aggregated_variances)
+        
+        # Calculate confidence intervals
+        lower_bounds = aggregated_means - 1.96 * std_devs
+        upper_bounds = aggregated_means + 1.96 * std_devs
+        time_points = np.arange(num_time_points)
+        
+        # Plotting
+        plt.figure(figsize=(10, 6))
+        plt.fill_between(time_points, lower_bounds, upper_bounds, color='skyblue', alpha=0.4)
+        plt.plot(time_points, aggregated_means, label=f'Latent Variable {latent_variable_idx+1}')
+        plt.xlabel('Time Points')
+        plt.ylabel('Latent Variable Value')
+        plt.title(f'95% Confidence Interval for Latent Variable {latent_variable_idx+1} (Iteration {iteration})')
+        plt.legend()
+        
+        # Save the plot
+        file_name = f'{latent_variable_idx+1}_Iteration_{iteration}_Latent.png'
+        plt.savefig(os.path.join(save_dir, file_name))
+        plt.close()
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def plot_cnf_loss(cnf_loss_history,iteration,save_dir='nggpfa_plots/loss'):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
+    plt.figure(figsize=(8, 5))
+    plt.plot([i for i in range(len(cnf_loss_history))],cnf_loss_history, label='CNF Loss')
+    plt.xlabel('Iteration')
+    plt.ylabel('Loss')
+    plt.title('CNF Training Loss Over Iterations')
+    plt.legend()
+    file_name = f'Iteration_{iteration}_Loss.png'
+
+    plt.savefig(os.path.join(save_dir, file_name))
+    plt.close()
+
+
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
+import os
+
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
+import os
+
+def transform_and_plot_linear_gaussian(cnf, iteration, save_dir='nggpfa_plots/transformation'):
+    """
+    Generates Linear Gaussian data, transforms it using a CNF, and saves a plot
+    of the original and the two distinct transformed data sets.
+
+    Parameters:
+    - cnf: The Continuous Normalizing Flow model.
+    - iteration: Iteration number to include in the filename.
+    - save_dir (str): Directory where the plot will be saved.
+    """
+    filename = f'linear_cnf_transformation_iter{iteration}.png'
+    
+    # Ensure the save directory exists
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    
+    # Generate Linear Gaussian Data
+    X = np.linspace(0, 10, 100).reshape(-1, 1)
+    y = 2 * X + np.random.normal(0, 1, X.shape)
+    
+    # Stack the data to match CNF input shape [(100, 2) in this example]
+    data = np.hstack([X, y])
+
+    # Convert to PyTorch tensor
+    data_tensor = torch.tensor(data, dtype=torch.float32)
+
+    # Transform the Data Using the CNF
+    with torch.no_grad():
+        transformed_data = cnf(data_tensor).numpy()
+
+    # Assuming the output is structured as two trajectories concatenated
+    transformed_data_1 = transformed_data[:len(transformed_data)//2]
+    transformed_data_2 = transformed_data[len(transformed_data)//2:]
+
+    # Plot Original vs Transformed Data
+    plt.figure(figsize=(15, 6))
+
+    plt.subplot(1, 3, 1)
+    plt.scatter(data[:, 0], data[:, 1], label='Original Data', alpha=0.6)
+    plt.title('Original Linear Gaussian Data')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+
+    plt.subplot(1, 3, 2)
+    plt.scatter(transformed_data_1[:, 0], transformed_data_1[:, 1], label=f'Transformed Data 1 iter {iter}', alpha=0.6, color='r')
+    plt.title('First CNF Transformation')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+
+    plt.subplot(1, 3, 3)
+    plt.scatter(transformed_data_2[:, 0], transformed_data_2[:, 1], label=f'Transformed Data 2 iter {iter}', alpha=0.6, color='g')
+    plt.title('Second CNF Transformation')
+    plt.xlabel('X')
+    plt.ylabel('Y')
+
+    plt.tight_layout()
+    plt.legend(loc='upper left', bbox_to_anchor=(1,1))
+
+    # Save the plot
+    plt.savefig(os.path.join(save_dir, filename))
+    plt.close()  # Close the plot to free up memory
+

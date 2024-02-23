@@ -239,8 +239,8 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
                                                   get_ll=get_ll)
         lls.append(ll)
         if iter_id==3:
-            save_gpfa_confidence_intervals(seq_latent,3)
-
+            #save_gpfa_confidence_intervals(seq_latent,3)
+            continue
         # ==== M STEP ====
         sum_p_auto = np.zeros((x_dim, x_dim))
         for seq_latent in seqs_latent:
@@ -305,6 +305,8 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
     if len(lls) < max_iters:
         print('Fitting has converged after {0} EM iterations.)'.format(
             len(lls)))
+    else:
+        print(f'Fitting never converged and ran for {max_iters} EM iterations')
 
     if np.any(np.diag(params['R']) == var_floor):
         warnings.warn('Private variance floor used for one or more observed '
