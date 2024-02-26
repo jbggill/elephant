@@ -23,18 +23,9 @@ from . import gpfa_util
 import sys
 from IPython.display import clear_output
 from tqdm.notebook import trange
-import numpy as np
-import matplotlib.pyplot as plt
-import os
 
-import numpy as np
+
 import matplotlib.pyplot as plt
-import torch
-import os
-import numpy as np
-import matplotlib.pyplot as plt
-import os
-import torch
 
 
 
