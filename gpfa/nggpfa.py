@@ -311,7 +311,7 @@ class NGGPFA(sklearn.base.BaseEstimator):
             cnf = self.cnf,
             cnf_lr = self.cnf_lr, 
             device=self.device,
-            convergence=self.convergencem
+            convergence=self.convergence,
             reverse=self.reverse,
             save_dir=self.save_dir
             )

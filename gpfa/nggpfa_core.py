@@ -24,7 +24,8 @@ import sys
 from IPython.display import clear_output
 from tqdm.notebook import trange
 
-
+import os
+import matplotlib.pyplot as plt
 
 
 
