@@ -30,7 +30,7 @@ from tqdm.notebook import trange
 
 def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
         em_max_iters=1000, tau_init=100.0, eps_init=1.0E-3, freq_ll=5,
-        verbose=False, cnf = None, cnf_lr=.1,device='cpu',convergence=True):
+        verbose=False, cnf = None, cnf_lr=.1,device='cpu',convergence=True,save_dir=None,reverse=False):
     """
     Fit the GPFA model with the given training data.
 
@@ -151,7 +151,7 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
     print('\nFitting GPFA model with CNF...')
     params_est, seqs_train_cut, ll_cut, iter_time, cnf = em(
     params_init, seqs_train_cut, device,min_var_frac=min_var_frac,
-    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnf=cnf, cnf_lr=cnf_lr,convergence=convergence)
+    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnf=cnf, cnf_lr=cnf_lr,convergence=convergence,save_dir=save_dir,reverse=reverse)
 
     fit_info = {'iteration_time': iter_time, 'log_likelihoods': ll_cut}
 
@@ -159,7 +159,7 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
 
 
 def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0.01,
-       freq_ll=5, verbose=False, cnf = None, cnf_lr=.1,convergence=False):
+       freq_ll=5, verbose=False, cnf = None, cnf_lr=.1,convergence=False,save_dir=None,reverse=False):
     """
     Fits GPFA model parameters using expectation-maximization (EM) algorithm.
 
@@ -260,7 +260,7 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
             ll_old = ll
 
         cnf_optimizer.zero_grad()
-        seqs_latent, ll, cnf, delta_log_p = exact_inference_with_ll(cnf, seqs_train, params, device)
+        seqs_latent, ll, cnf, delta_log_p = exact_inference_with_ll(cnf, seqs_train, params, device,reverse=reverse)
         lls.append(ll.item())  # Assuming ll is a tensor, use .item() to extract its scalar value for logging
         loss = torch.tensor(-ll, requires_grad=True) +  delta_log_p
 
@@ -269,10 +269,10 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
         loss.backward()
         cnf_optimizer.step()
-        if iter_id % 1 == 0:
-            save_gpfa_confidence_intervals(seqs_latent, iter_id)
-            plot_cnf_loss(lls,iter_id)
-            transform_and_plot_linear_gaussian(cnf,iter_id)
+        if save_dir:
+            save_gpfa_confidence_intervals(save_dir,seqs_latent, iter_id)
+            plot_cnf_loss(save_dir,lls,iter_id)
+            transform_and_plot_linear_gaussian(save_dir,cnf,iter_id)
 #            plot_and_save_vector_field(cnf)
 
 
@@ -352,7 +352,7 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
 
 
-def exact_inference_with_ll(cnf, seqs, params, device):
+def exact_inference_with_ll(cnf, seqs, params, device,reverse=False):
     y_dim, x_dim = params['C'].shape
     dtype_out = [(x, seqs[x].dtype) for x in seqs.dtype.names] + \
                 [('latent_variable', object), ('Vsm', object), ('VsmGP', object)]
@@ -403,7 +403,7 @@ def exact_inference_with_ll(cnf, seqs, params, device):
         for i, n in enumerate(n_list):
             latent_var_np = latent_variable_mat[:, i].reshape((x_dim, t), order='F')
             latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32).to(device)
-            delta_log_p, _, transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor.T, reverse=True)
+            delta_log_p, _, transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor.T, reverse=reverse)
             seqs_latent[n]['latent_variable'] = transformed_latent_var_tensor.detach().cpu().numpy().T
             seqs_latent[n]['Vsm'] = vsm
             seqs_latent[n]['VsmGP'] = vsm_gp
