@@ -558,14 +558,7 @@ def setup_flow(device, params, context_dim):
     set_cnf_options(params, cnf)
     return cnf
 
-import os
-import matplotlib.pyplot as plt
-
-import numpy as np
-import matplotlib.pyplot as plt
-import os
-
-def save_gpfa_confidence_intervals(seqs_latent, iteration, save_dir='nggpfa_plots/confidence'):
+def save_gpfa_confidence_intervals(save_dir,seqs_latent, iteration):
     """
     Save confidence interval plots for each latent variable at a specified iteration.
 
@@ -574,6 +567,7 @@ def save_gpfa_confidence_intervals(seqs_latent, iteration, save_dir='nggpfa_plot
     - iteration: The current iteration number of the fitting process.
     - save_dir: The directory where plots will be saved.
     """
+    save_dir +='/confidence'
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     
@@ -615,11 +609,9 @@ def save_gpfa_confidence_intervals(seqs_latent, iteration, save_dir='nggpfa_plot
         file_name = f'{latent_variable_idx+1}_Iteration_{iteration}_Latent.png'
         plt.savefig(os.path.join(save_dir, file_name))
         plt.close()
-import numpy as np
-import matplotlib.pyplot as plt
 
-
-def plot_cnf_loss(cnf_loss_history,iteration,save_dir='nggpfa_plots/loss'):
+def plot_cnf_loss(save_dir,cnf_loss_history,iteration):
+    save_dir += '/loss'
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
     
@@ -636,20 +628,7 @@ def plot_cnf_loss(cnf_loss_history,iteration,save_dir='nggpfa_plots/loss'):
 
 
 
-
-
-import numpy as np
-import matplotlib.pyplot as plt
-from sklearn.gaussian_process import GaussianProcessRegressor
-from sklearn.gaussian_process.kernels import RBF, ConstantKernel as C
-import os
-
-import numpy as np
-import matplotlib.pyplot as plt
-import torch
-import os
-
-def transform_and_plot_linear_gaussian(cnf, iteration, save_dir='nggpfa_plots/transformation'):
+def transform_and_plot_linear_gaussian(save_dir, cnf, iteration):
     """
     Generates Linear Gaussian data, transforms it using a CNF, and saves a plot
     of the original and the two distinct transformed data sets.
@@ -659,6 +638,7 @@ def transform_and_plot_linear_gaussian(cnf, iteration, save_dir='nggpfa_plots/tr
     - iteration: Iteration number to include in the filename.
     - save_dir (str): Directory where the plot will be saved.
     """
+    save_dir += '/transformation'  # Append transformation to the save directory
     filename = f'linear_cnf_transformation_iter{iteration}.png'
     
     # Ensure the save directory exists
@@ -675,9 +655,10 @@ def transform_and_plot_linear_gaussian(cnf, iteration, save_dir='nggpfa_plots/tr
     # Convert to PyTorch tensor
     data_tensor = torch.tensor(data, dtype=torch.float32)
 
+    # Assuming the CNF model has been properly defined and accepts the data tensor format correctly
     # Transform the Data Using the CNF
     with torch.no_grad():
-        transformed_data = cnf(data_tensor).numpy()
+        transformed_data, _ = cnf(data_tensor, torch.zeros(data_tensor.size(0), 1).to(data_tensor))#.detach().numpy()  # Updated to include CNF usage as per previous context
 
     # Assuming the output is structured as two trajectories concatenated
     transformed_data_1 = transformed_data[:len(transformed_data)//2]
@@ -693,13 +674,13 @@ def transform_and_plot_linear_gaussian(cnf, iteration, save_dir='nggpfa_plots/tr
     plt.ylabel('Y')
 
     plt.subplot(1, 3, 2)
-    plt.scatter(transformed_data_1[:, 0], transformed_data_1[:, 1], label=f'Transformed Data 1 iter {iter}', alpha=0.6, color='r')
+    plt.scatter(transformed_data_1[:, 0], transformed_data_1[:, 1], label=f'Transformed Data 1 iter {iteration}', alpha=0.6, color='r')
     plt.title('First CNF Transformation')
     plt.xlabel('X')
     plt.ylabel('Y')
 
     plt.subplot(1, 3, 3)
-    plt.scatter(transformed_data_2[:, 0], transformed_data_2[:, 1], label=f'Transformed Data 2 iter {iter}', alpha=0.6, color='g')
+    plt.scatter(transformed_data_2[:, 0], transformed_data_2[:, 1], label=f'Transformed Data 2 iter {iteration}', alpha=0.6, color='g')
     plt.title('Second CNF Transformation')
     plt.xlabel('X')
     plt.ylabel('Y')
@@ -711,3 +692,35 @@ def transform_and_plot_linear_gaussian(cnf, iteration, save_dir='nggpfa_plots/tr
     plt.savefig(os.path.join(save_dir, filename))
     plt.close()  # Close the plot to free up memory
 
+
+
+def plot_latent_trajectories(seqs_latent, save_dir, iteration, trial_to_plot=0):
+    """
+    Plots and saves latent trajectories for a specified trial.
+
+    Parameters:
+    - seqs_latent: np.recarray containing latent variables and their variances for each trial.
+    - save_dir: Directory where the plots will be saved.
+    - iteration: Iteration number, used for naming the saved plot file.
+    - trial_to_plot: Index of the trial to plot.
+    """
+    save_dir += '/latent_trajectories'  # Subdirectory for latent trajectories plots
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    # Prepare the plot
+    plt.figure(figsize=(10, 6))
+    num_latent_vars = seqs_latent[trial_to_plot]['latent_variable'].shape[0]
+    
+    for i in range(num_latent_vars):
+        plt.plot(seqs_latent[trial_to_plot]['latent_variable'][i, :], label=f'Dimension {i+1}')
+
+    plt.title(f'Latent Trajectories for Trial {trial_to_plot}')
+    plt.xlabel('Time Bins')
+    plt.ylabel('Latent Variable Value')
+    plt.legend()
+
+    # Save the plot
+    filename = f'latent_trajectories_trial_{trial_to_plot}_iter_{iteration}.png'
+    plt.savefig(os.path.join(save_dir, filename))
+    plt.close()  # Close the plot to free up memory

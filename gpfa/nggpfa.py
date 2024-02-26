@@ -178,7 +178,7 @@ class NGGPFA(sklearn.base.BaseEstimator):
 
     def __init__(self, bin_size=20 * pq.ms, x_dim=3, min_var_frac=0.01,
                  tau_init=100.0 * pq.ms, eps_init=1.0E-3, em_tol=1.0E-8,
-                 em_max_iters=500, freq_ll=5, verbose=False, cnf_lr = .01,device='cpu',convergence=True):
+                 em_max_iters=500, freq_ll=5, verbose=False, cnf_lr = .01,device='cpu',convergence=True,reverse=False,save_dir=None):
         # Initialize object
         self.bin_size = bin_size
         self.x_dim = x_dim
@@ -198,6 +198,8 @@ class NGGPFA(sklearn.base.BaseEstimator):
         self.cnf_lr = cnf_lr
         self.device=device
         self.convergence=convergence
+        self.reverse=reverse
+        self.save_dir=save_dir
 
 
         if not isinstance(self.bin_size, pq.Quantity):
@@ -309,7 +311,9 @@ class NGGPFA(sklearn.base.BaseEstimator):
             cnf = self.cnf,
             cnf_lr = self.cnf_lr, 
             device=self.device,
-            convergence=self.convergence
+            convergence=self.convergencem
+            reverse=self.reverse,
+            save_dir=self.save_dir
             )
  
 
@@ -423,7 +427,7 @@ class NGGPFA(sklearn.base.BaseEstimator):
             seq['y'] = seq['y'][self.has_spikes_bool, :]
         print('seqs2: ', np.shape(seqs))
         seqs, ll, cnf, delta_log_p = nggpfa_core.exact_inference_with_ll(self.cnf,seqs,
-                                                     self.params_estimated,device=self.device)
+                                                     self.params_estimated,device=self.device,reverse=self.reverse)
         self.transform_info['log_likelihood'] = ll
         self.transform_info['num_bins'] = seqs['T']
         Corth, seqs = gpfa_core.orthonormalize(self.params_estimated, seqs)
