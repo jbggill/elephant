@@ -424,7 +424,7 @@ class NGGPFA(sklearn.base.BaseEstimator):
         for seq in seqs:
             seq['y'] = seq['y'][self.has_spikes_bool, :]
         print('seqs2: ', np.shape(seqs))
-        seqs, ll, cnf, delta_log_p = nggpfa_core.exact_inference_with_ll(self.cnf,seqs,
+        seqs, ll, _, _ = nggpfa_core.exact_inference_with_ll(self.cnf,seqs,
                                                      self.params_estimated,device=self.device,reverse=self.reverse)
         self.transform_info['log_likelihood'] = ll
         self.transform_info['num_bins'] = seqs['T']
@@ -467,6 +467,33 @@ class NGGPFA(sklearn.base.BaseEstimator):
         """
         self.fit(spiketrains)
         return self.transform(spiketrains, returned_data=returned_data)
+    
+    def project_latent_to_observation(self, seqs_latent):
+        """
+        Project the latent variables back to the observation space.
+
+        :param seqs_latent: np.recarray containing latent variables for each trial.
+        :return: projections: Projections of the latent variables back to the data space.
+        """
+        projections = []
+        for trial in seqs_latent:
+            latent_variables = trial['latent_variable']
+            trial_projection = self.params_est['C'] @ latent_variables + self.params_est['d'][:, np.newaxis]
+            projections.append(trial_projection)
+        return projections
+
+    def compute_confidence_intervals(self, seqs_latent):
+        """
+        Compute confidence intervals for the projected latent variables.
+
+        :param seqs_latent: np.recarray containing latent variables and their variances for each trial.
+        :return: confidence_intervals: Confidence intervals for the projections.
+        """
+        confidence_intervals = []
+        for trial in seqs_latent:
+            trial_confidence_intervals = 1.96 * np.sqrt(np.diagonal(trial['Vsm'], axis1=0, axis2=1))
+            confidence_intervals.append(trial_confidence_intervals)
+        return confidence_intervals
 
     def score(self, spiketrains):
         """
