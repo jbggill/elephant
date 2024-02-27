@@ -263,8 +263,7 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
         cnf_optimizer.zero_grad()
         seqs_latent, ll, cnf, delta_log_p = exact_inference_with_ll(cnf, seqs_train, params, device, reverse=reverse)
-        lls.append(ll.item())  # Assuming ll is a tensor, use .item() to extract its scalar value for logging
-        loss = torch.tensor(-ll, requires_grad=True) +  delta_log_p
+        loss = torch.tensor(-ll, requires_grad=True) +  torch.mean(delta_log_p.squeeze(-1))
 
         clip_value = 1.0
         # Apply gradients
@@ -471,24 +470,27 @@ def exact_inference_with_ll(cnf, seqs, params, device,reverse):
         latent_variable_mat = gpfa_util.fill_persymm(
             blk_prod, x_dim, t).dot(term1_mat)
 
+        delta_log_py_list = []
         for i, n in enumerate(n_list):
-            seqs_latent[n]['latent_variable'] = \
-                latent_variable_mat[:, i].reshape((x_dim, t), order='F')
+            latent_var_np = latent_variable_mat[:, i].reshape((x_dim, t), order='F')
+            latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32).to(device)
+            delta_log_p, _, transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor.T, reverse=reverse)
+            seqs_latent[n]['latent_variable'] = transformed_latent_var_tensor.detach().cpu().numpy().T
             seqs_latent[n]['Vsm'] = vsm
             seqs_latent[n]['VsmGP'] = vsm_gp
+            delta_log_py_list.append(delta_log_p)
 
         # Compute data likelihood
         val = -t * logdet_r - logdet_k_big - logdet_m \
                 - y_dim * t * np.log(2 * np.pi)
-        ll = ll + len(n_list) * val - (rinv.dot(dif) * dif).sum() \
+        ll += len(n_list) * val - (rinv.dot(dif) * dif).sum() \
             + (term1_mat.T.dot(minv) * term1_mat.T).sum()
 
 
     ll /= 2
 
 
-
-    return seqs_latent, ll
+    return seqs_latent, ll, cnf, delta_log_p 
  
 
 
