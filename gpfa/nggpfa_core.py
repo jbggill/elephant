@@ -26,7 +26,7 @@ from tqdm.notebook import trange
 
 
 import matplotlib.pyplot as plt
-
+import os
 
 
 
@@ -356,75 +356,140 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
 
 def exact_inference_with_ll(cnf, seqs, params, device,reverse):
+    """   Extracts latent trajectories from neural data, given GPFA model parameters.
+
+    Parameters
+    ----------
+    seqs : np.recarray
+        Input data structure, whose n-th element (corresponding to the n-th
+        experimental trial) has fields:
+        y : np.ndarray of shape (#units, #bins)
+            neural data
+        T : int
+            number of bins
+    params : dict
+        GPFA model parameters whe the following fields:
+        C : np.ndarray
+            FA factor loadings matrix
+        d : np.ndarray
+            FA mean vector
+        R : np.ndarray
+            FA noise covariance matrix
+        gamma : np.ndarray
+            GP timescale
+        eps : np.ndarray
+            GP noise variance
+    get_ll : bool, optional
+          specifies whether to compute data log likelihood (default: True)
+
+    Returns
+    -------
+    seqs_latent : np.recarray
+        a copy of the input data structure, augmented with the new
+        fields:
+        latent_variable :  (#latent_vars, #bins) np.ndarray
+              posterior mean of latent variables at each time bin
+        Vsm :  (#latent_vars, #latent_vars, #bins) np.ndarray
+              posterior covariance between latent variables at each
+              timepoint
+        VsmGP :  (#bins, #bins, #latent_vars) np.ndarray
+                posterior covariance over time for each latent
+                variable
+    ll : float
+        data log likelihood, np.nan is returned when `get_ll` is set False
+    """
     y_dim, x_dim = params['C'].shape
-    dtype_out = [(x, seqs[x].dtype) for x in seqs.dtype.names] + \
-                [('latent_variable', object), ('Vsm', object), ('VsmGP', object)]
+
+    # copy the contents of the input data structure to output structure
+    dtype_out = [(x, seqs[x].dtype) for x in seqs.dtype.names]
+    dtype_out.extend([('latent_variable', object), ('Vsm', object),
+                      ('VsmGP', object)])
     seqs_latent = np.empty(len(seqs), dtype=dtype_out)
     for dtype_name in seqs.dtype.names:
         seqs_latent[dtype_name] = seqs[dtype_name]
 
+    # Precomputations
     if params['notes']['RforceDiagonal']:
         rinv = np.diag(1.0 / np.diag(params['R']))
-        logdet_r = np.sum(np.log(np.diag(params['R'])))
+        logdet_r = (np.log(np.diag(params['R']))).sum()
     else:
         rinv = linalg.inv(params['R'])
-        rinv = (rinv + rinv.T) / 2
-        logdet_r = np.linalg.slogdet(params['R'])[1]
+        rinv = (rinv + rinv.T) / 2  # ensure symmetry
+        logdet_r = gpfa_util.logdet(params['R'])
 
     c_rinv = params['C'].T.dot(rinv)
     c_rinv_c = c_rinv.dot(params['C'])
-    t_all = seqs['T']
+    t_all = seqs_latent['T']
     t_uniq = np.unique(t_all)
     ll = 0.
 
+    # Overview:
+    # - Outer loop on each element of Tu.
+    # - For each element of Tu, find all trials with that length.
+    # - Do inference and LL computation for all those trials together.
     for t in t_uniq:
+        # create the covariance matrix
         k_big, k_big_inv, logdet_k_big = gpfa_util.make_k_big(params, t)
         k_big = sparse.csr_matrix(k_big)
+        
         blah = [c_rinv_c for _ in range(t)]
-        c_rinv_c_big = linalg.block_diag(*blah)
+        c_rinv_c_big = linalg.block_diag(*blah)  # (xDim*T) x (xDim*T)
         minv, logdet_m = gpfa_util.inv_persymm(k_big_inv + c_rinv_c_big, x_dim)
+
+        # Note that posterior covariance does not depend on observations,
+        # so can compute once for all trials with same T.
+        # xDim x xDim posterior covariance for each timepoint
         vsm = np.full((x_dim, x_dim, t), np.nan)
         idx = np.arange(0, x_dim * t + 1, x_dim)
         for i in range(t):
             vsm[:, :, i] = minv[idx[i]:idx[i + 1], idx[i]:idx[i + 1]]
+
+        # T x T posterior covariance for each GP
         vsm_gp = np.full((t, t, x_dim), np.nan)
         for i in range(x_dim):
             vsm_gp[:, :, i] = minv[i::x_dim, i::x_dim]
 
+        # Process all trials with length T
         n_list = np.where(t_all == t)[0]
-        dif = np.hstack(seqs[n_list]['y']) - params['d'][:, np.newaxis]
+        # dif is yDim x sum(T)
+        dif = np.hstack(seqs_latent[n_list]['y']) - params['d'][:, np.newaxis]
+        # term1Mat is (xDim*T) x length(nList)
         term1_mat = c_rinv.dot(dif).reshape((x_dim * t, -1), order='F')
 
+        # Compute blkProd = CRinvC_big * invM efficiently
+        # blkProd is block persymmetric, so just compute top half
         t_half = int(np.ceil(t / 2.0))
         blk_prod = np.zeros((x_dim * t_half, x_dim * t))
         idx = range(0, x_dim * t_half + 1, x_dim)
         for i in range(t_half):
-            blk_prod[idx[i]:idx[i + 1], :] = c_rinv_c.dot(minv[idx[i]:idx[i + 1], :])
-        blk_prod = k_big[:x_dim * t_half, :].dot(gpfa_util.fill_persymm(np.eye(x_dim * t_half, x_dim * t) - blk_prod, x_dim, t))
-        latent_variable_mat = gpfa_util.fill_persymm(blk_prod, x_dim, t).dot(term1_mat)
-        delta_log_py_list = []
+            blk_prod[idx[i]:idx[i + 1], :] = c_rinv_c.dot(
+                minv[idx[i]:idx[i + 1], :])
+        blk_prod = k_big[:x_dim * t_half, :].dot(
+            gpfa_util.fill_persymm(np.eye(x_dim * t_half, x_dim * t) -
+                                   blk_prod, x_dim, t))
+        # latent_variableMat is (xDim*T) x length(nList)
+        latent_variable_mat = gpfa_util.fill_persymm(
+            blk_prod, x_dim, t).dot(term1_mat)
+
         for i, n in enumerate(n_list):
-            latent_var_np = latent_variable_mat[:, i].reshape((x_dim, t), order='F')
-            latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32).to(device)
-            delta_log_p, _, transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor.T, reverse=reverse)
-            seqs_latent[n]['latent_variable'] = transformed_latent_var_tensor.detach().cpu().numpy().T
+            seqs_latent[n]['latent_variable'] = \
+                latent_variable_mat[:, i].reshape((x_dim, t), order='F')
             seqs_latent[n]['Vsm'] = vsm
             seqs_latent[n]['VsmGP'] = vsm_gp
-            delta_log_py_list.append(delta_log_p)
+
+        # Compute data likelihood
+        val = -t * logdet_r - logdet_k_big - logdet_m \
+                - y_dim * t * np.log(2 * np.pi)
+        ll = ll + len(n_list) * val - (rinv.dot(dif) * dif).sum() \
+            + (term1_mat.T.dot(minv) * term1_mat.T).sum()
 
 
-            transformed_dif = seqs_latent[n]['y'] - (params['C'] @ seqs_latent[n]['latent_variable'] + params['d'][:, np.newaxis])
-            
-            # Update LL with transformed 'dif'
-            val = -t * logdet_r - logdet_k_big - logdet_m - y_dim * t * np.log(2 * np.pi)
-            ll += len(n_list) * val - (rinv.dot(transformed_dif) * transformed_dif).sum() + (term1_mat.T.dot(minv) * term1_mat.T).sum()
-        delta_log_py = torch.stack(delta_log_py_list).mean()
-        #val = -t * logdet_r - logdet_k_big - logdet_m - y_dim * t * np.log(2 * np.pi)
+    ll /= 2
+
+
+
+    return seqs_latent, ll
  
-
-       # ll += len(n_list) * val - (rinv.dot(dif) * dif).sum() + (term1_mat.T.dot(minv) * term1_mat.T).sum()
-
-    return seqs_latent, ll, cnf, delta_log_py
 
 
 

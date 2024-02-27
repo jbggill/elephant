@@ -478,7 +478,7 @@ class NGGPFA(sklearn.base.BaseEstimator):
         projections = []
         for trial in seqs_latent:
             latent_variables = trial['latent_variable']
-            trial_projection = self.params_est['C'] @ latent_variables + self.params_est['d'][:, np.newaxis]
+            trial_projection = self.params_estimated['C'] @ latent_variables + self.params_estimated['d'][:, np.newaxis]
             projections.append(trial_projection)
         return projections
 
