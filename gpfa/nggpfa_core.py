@@ -32,7 +32,7 @@ import os
 
 def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
         em_max_iters=1000, tau_init=100.0, eps_init=1.0E-3, freq_ll=5,
-        verbose=False, cnf = None, cnf_lr=.1,device='cpu',convergence=True,reverse=False,save_dir=None):
+        verbose=False, cnfs = None, cnf_lr=.1,device='cpu',convergence=True,reverse=False,save_dir=None):
     """
     Fit the GPFA model with the given training data.
 
@@ -151,17 +151,17 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
     # Fit model parameters
     # =====================
     print('\nFitting GPFA model with CNF...')
-    params_est, seqs_train_cut, ll_cut, iter_time, cnf = em(
+    params_est, seqs_train_cut, ll_cut, iter_time, cnfs = em(
     params_init, seqs_train_cut, device,min_var_frac=min_var_frac,
-    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnf=cnf, cnf_lr=cnf_lr,convergence=convergence,reverse=reverse,save_dir=save_dir)
+    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnfs=cnfs, cnf_lr=cnf_lr,convergence=convergence,reverse=reverse,save_dir=save_dir)
 
     fit_info = {'iteration_time': iter_time, 'log_likelihoods': ll_cut}
 
-    return params_est, fit_info, cnf
+    return params_est, fit_info, cnfs
 
 
 def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0.01,
-       freq_ll=5, verbose=False, cnf = None, cnf_lr=.1,convergence=True,reverse=False,save_dir=None):
+       freq_ll=5, verbose=False, cnfs = [], cnf_lr=.1,convergence=True,reverse=False,save_dir=None):
     """
     Fits GPFA model parameters using expectation-maximization (EM) algorithm.
 
@@ -246,34 +246,39 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
     var_floor = min_var_frac * np.diag(np.cov(np.hstack(seqs_train['y'])))
     seqs_latent = None
 
-    # CNF optimizer using ADAM (this can be changed)
-    cnf_optimizer = torch.optim.Adam(cnf.parameters(), lr=cnf_lr)
+    # Correct initialization of CNF optimizers
+    cnf_optimizers = [torch.optim.Adam(cnf.parameters(), lr=cnf_lr) for cnf in cnfs]
 
-    # Loop once for each iteration of EM algorithm
-    for iter_id in trange(1, max_iters + 1, desc='EM iteration',
-                          disable=not verbose):
-       
+    # Loop once for each iteration of the EM algorithm
+    for iter_id in trange(1, max_iters + 1, desc='EM iteration', disable=not verbose):
         if verbose:
             print()
         tic = time.time()
 
-        # ==== E STEP =====
+        # ==== E STEP ====
         if not np.isnan(ll):
             ll_old = ll
+        # Exact inference step; ensure it returns updated values appropriately
+        seqs_latent, ll, cnfs, delta_log_pys, latent_ll = exact_inference_with_ll(cnfs, seqs_train, params, device, reverse=reverse)
 
-        cnf_optimizer.zero_grad()
-        seqs_latent, ll, cnf, delta_log_p,latent_ll = exact_inference_with_ll(cnf, seqs_train, params, device, reverse=reverse)
-        loss = torch.tensor(-latent_ll, requires_grad=True) +  torch.mean(delta_log_p.squeeze(-1))
         lls.append(ll)
-        clip_value = 1.0
-        # Apply gradients
 
-        loss.backward()
-        cnf_optimizer.step()
+        # Now, optimize each CNF with its respective delta_log_py
+        for i, (optimizer, cnf_delta_log_py) in enumerate(zip(cnf_optimizers, delta_log_pys)):
+            optimizer.zero_grad()  # Zero gradients for this CNF's optimizer
+            
+            # Calculate the loss for this CNF using its specific delta_log_py
+            # Note: You may need to adjust the loss calculation to include other components relevant to this CNF
+            loss = -torch.tensor(latent_ll, requires_grad=True) #+ torch.mean(cnf_delta_log_py.squeeze(-1))
+            
+            loss.backward(retain_graph=True)  # Backpropagate loss, retaining graph for subsequent CNFs
+            
+            optimizer.step()  # Update this CNF's parameters
+
         if save_dir:
             save_gpfa_confidence_intervals(save_dir,seqs_latent, iter_id)
             plot_cnf_loss(save_dir,lls,iter_id)
-            transform_and_plot_linear_gaussian(save_dir,cnf,iter_id)
+            #transform_and_plot_linear_gaussian(save_dir,cnf,iter_id)
             plot_latent_trajectories(seqs_latent, save_dir, iteration=len(lls), trial_to_plot=0)
 
 #            plot_and_save_vector_field(cnf)
@@ -351,11 +356,11 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
         warnings.warn('Private variance floor used for one or more observed '
                       'dimensions in GPFA.')
 
-    return params, seqs_latent, lls, iter_time, cnf
+    return params, seqs_latent, lls, iter_time, cnfs
 
 
 
-def exact_inference_with_ll(cnf, seqs, params, device,reverse):
+def exact_inference_with_ll(cnfs, seqs, params, device,reverse):
     """   Extracts latent trajectories from neural data, given GPFA model parameters.
 
     Parameters
@@ -471,12 +476,23 @@ def exact_inference_with_ll(cnf, seqs, params, device,reverse):
         latent_variable_mat = gpfa_util.fill_persymm(
             blk_prod, x_dim, t).dot(term1_mat)
         latent_ll = 0
-        delta_log_py_list = []
+        delta_log_pys = [[] for _ in range(x_dim)]  # Initialize list of lists for delta_log_p for each CNF
+
+        latent_lls = []
         for i, n in enumerate(n_list):
             latent_var_np = latent_variable_mat[:, i].reshape((x_dim, t), order='F')
-            latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32).to(device)
-            delta_log_p, _, transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor.T, reverse=reverse)
-            seqs_latent[n]['latent_variable'] = transformed_latent_var_tensor.detach().cpu().numpy().T
+            transformed_latent_vars = np.zeros_like(latent_var_np)
+            delta_log_py_list = []
+            
+            for dim in range(x_dim):
+                latent_var_tensor = torch.tensor(latent_var_np[dim], dtype=torch.float32, device=device).unsqueeze(0)  # Add dimension for batch
+                delta_log_p, _, transformed_latent_var_tensor = apply_flow(cnfs[dim], latent_var_tensor.T, reverse=reverse)
+        
+                transformed_latent_vars[dim] = transformed_latent_var_tensor.detach().cpu().numpy()  
+        
+                delta_log_pys[dim].append(delta_log_p)
+
+            seqs_latent[n]['latent_variable'] = transformed_latent_vars
             seqs_latent[n]['Vsm'] = vsm
             seqs_latent[n]['VsmGP'] = vsm_gp
             delta_log_py_list.append(delta_log_p)
@@ -499,8 +515,9 @@ def exact_inference_with_ll(cnf, seqs, params, device,reverse):
     ll /= 2
 
 
-    return seqs_latent, ll, cnf, delta_log_p,latent_ll
+    return seqs_latent, ll, cnfs, delta_log_pys,latent_ll
  
+
 
 
 
