@@ -262,9 +262,9 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
             ll_old = ll
 
         cnf_optimizer.zero_grad()
-        seqs_latent, ll, cnf, delta_log_p = exact_inference_with_ll(cnf, seqs_train, params, device, reverse=reverse)
-        loss = torch.tensor(-ll, requires_grad=True) +  torch.mean(delta_log_p.squeeze(-1))
-
+        seqs_latent, ll, cnf, delta_log_p,latent_ll = exact_inference_with_ll(cnf, seqs_train, params, device, reverse=reverse)
+        loss = torch.tensor(-latent_ll, requires_grad=True) +  torch.mean(delta_log_p.squeeze(-1))
+        lls.append(ll)
         clip_value = 1.0
         # Apply gradients
 
@@ -332,8 +332,9 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
         # Verify that likelihood is growing monotonically
         if iter_id % freq_ll:
-            print('Iter ID: ',iter_id, 'Log Likelihood: ', ll)
-        if iter_id <= 2: # free parameter to see how early in the fitting to alllow the graph to converge
+            print('Iter ID: ',iter_id, 'EM Log Likelihood: ', ll, '\nCNF Log Likelihood: ', latent_ll)
+            print('-'*15)
+        if iter_id <= 5: # free parameter to see how early in the fitting to alllow the graph to converge
             ll_base = ll
         elif verbose and ll < ll_old:
             print('\nError: Data likelihood has decreased ',
@@ -469,7 +470,7 @@ def exact_inference_with_ll(cnf, seqs, params, device,reverse):
         # latent_variableMat is (xDim*T) x length(nList)
         latent_variable_mat = gpfa_util.fill_persymm(
             blk_prod, x_dim, t).dot(term1_mat)
-
+        latent_ll = 0
         delta_log_py_list = []
         for i, n in enumerate(n_list):
             latent_var_np = latent_variable_mat[:, i].reshape((x_dim, t), order='F')
@@ -479,6 +480,14 @@ def exact_inference_with_ll(cnf, seqs, params, device,reverse):
             seqs_latent[n]['Vsm'] = vsm
             seqs_latent[n]['VsmGP'] = vsm_gp
             delta_log_py_list.append(delta_log_p)
+
+            transformed_dif = seqs_latent[n]['y'] - (params['C'] @ seqs_latent[n]['latent_variable'] + params['d'][:, np.newaxis])
+            
+            # Update LL with transformed 'dif'
+            val = -t * logdet_r - logdet_k_big - logdet_m - y_dim * t * np.log(2 * np.pi)
+            latent_term_mat = c_rinv.dot(dif).reshape((x_dim * t, -1), order='F')
+
+            latent_ll += len(n_list) * val - (rinv.dot(transformed_dif) * transformed_dif).sum() + (latent_term_mat.T.dot(minv) * latent_term_mat.T).sum()
 
         # Compute data likelihood
         val = -t * logdet_r - logdet_k_big - logdet_m \
@@ -490,7 +499,7 @@ def exact_inference_with_ll(cnf, seqs, params, device,reverse):
     ll /= 2
 
 
-    return seqs_latent, ll, cnf, delta_log_p 
+    return seqs_latent, ll, cnf, delta_log_p,latent_ll
  
 
 
