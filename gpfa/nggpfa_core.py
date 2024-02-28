@@ -32,7 +32,7 @@ import os
 
 def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
         em_max_iters=1000, tau_init=100.0, eps_init=1.0E-3, freq_ll=5,
-        verbose=False, cnfs = None, cnf_lr=.1,device='cpu',convergence=True,reverse=False,save_dir=None):
+        verbose=False, cnfs = None, cnf_lr=.1,device='cpu',convergence=True,reverse=False,save_dir=None,min_convergence_epoch=5):
     """
     Fit the GPFA model with the given training data.
 
@@ -153,7 +153,7 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
     print('\nFitting GPFA model with CNF...')
     params_est, seqs_train_cut, ll_cut, iter_time, cnfs = em(
     params_init, seqs_train_cut, device,min_var_frac=min_var_frac,
-    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnfs=cnfs, cnf_lr=cnf_lr,convergence=convergence,reverse=reverse,save_dir=save_dir)
+    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnfs=cnfs, cnf_lr=cnf_lr,convergence=convergence,reverse=reverse,save_dir=save_dir,min_convergence_epoch)
 
     fit_info = {'iteration_time': iter_time, 'log_likelihoods': ll_cut}
 
@@ -161,7 +161,7 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
 
 
 def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0.01,
-       freq_ll=5, verbose=False, cnfs = [], cnf_lr=.1,convergence=True,reverse=False,save_dir=None):
+       freq_ll=5, verbose=False, cnfs = [], cnf_lr=.1,convergence=True,reverse=False,save_dir=None,min_convergence_epoch=5):
     """
     Fits GPFA model parameters using expectation-maximization (EM) algorithm.
 
@@ -248,7 +248,7 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
     # Correct initialization of CNF optimizers
     cnf_optimizers = [torch.optim.Adam(cnf.parameters(), lr=cnf_lr) for cnf in cnfs]
-
+    converged = False
     # Loop once for each iteration of the EM algorithm
     for iter_id in trange(1, max_iters + 1, desc='EM iteration', disable=not verbose):
         if verbose:
@@ -269,7 +269,18 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
             
             # Calculate the loss for this CNF using its specific delta_log_py
             # Note: You may need to adjust the loss calculation to include other components relevant to this CNF
-            loss = -torch.tensor(latent_ll, requires_grad=True) #+ torch.mean(cnf_delta_log_py.squeeze(-1))
+            # Assuming cnf_delta_log_py is your nested list of tensors
+            flattened_tensors = [tensor for sublist in cnf_delta_log_py for tensor in sublist]
+
+            # Squeeze dimension 0 of each tensor and compute the mean of all
+            squeezed_tensors = [tensor.squeeze(0) for tensor in flattened_tensors]
+            tensor_stack = torch.stack(squeezed_tensors)  # This requires all tensors to have the same shape after squeezing
+            mean_squeezed = torch.mean(tensor_stack)
+
+            # Compute the loss with your given operation
+            #loss = mean_squeezed
+            #loss =  - torch.tensor(latent_ll, requires_grad=True) + mean_squeezed
+            loss = mean_squeezed - torch.tensor(latent_ll, requires_grad=True) 
             
             loss.backward(retain_graph=True)  # Backpropagate loss, retaining graph for subsequent CNFs
             
@@ -283,7 +294,12 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
 #            plot_and_save_vector_field(cnf)
 
-
+        if converged:
+            # Verify that likelihood is growing monotonically
+            if iter_id % freq_ll:
+                print('Iter ID: ',iter_id, 'EM Log Likelihood: ', ll, '\nCNF Log Likelihood: ', latent_ll)
+                print('-'*15)
+            continue
         # ==== M STEP ====
         sum_p_auto = np.zeros((x_dim, x_dim))
         for seq_latent in seqs_latent:
@@ -339,13 +355,16 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
         if iter_id % freq_ll:
             print('Iter ID: ',iter_id, 'EM Log Likelihood: ', ll, '\nCNF Log Likelihood: ', latent_ll)
             print('-'*15)
-        if iter_id <= 5: # free parameter to see how early in the fitting to alllow the graph to converge
+        if iter_id <= min_convergence_epoch: # free parameter to see how early in the fitting to alllow the graph to converge
             ll_base = ll
         elif verbose and ll < ll_old:
             print('\nError: Data likelihood has decreased ',
                   'from {0} to {1}'.format(ll_old, ll))
-        elif (ll - ll_base) < (1 + tol) * (ll_old - ll_base) and convergence:
-            break
+        elif (ll - ll_base) < (1 + tol) * (ll_old - ll_base):
+            if convergence: break
+            else: 
+                print('GPFA converged, now just optimising CNF')
+                converged = True
 
 
     if len(lls) < max_iters:
