@@ -31,7 +31,7 @@ import os
 
 
 def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
-        em_max_iters=1000, tau_init=100.0, eps_init=1.0E-3, freq_ll=5,
+        em_max_iters=500, tau_init=100.0, eps_init=1.0E-3, freq_ll=5,
         verbose=False, cnfs = None, cnf_lr=.1,device='cpu',convergence=True,reverse=False,save_dir=None,min_convergence_epoch=5):
     """
     Fit the GPFA model with the given training data.
@@ -153,7 +153,7 @@ def fit(seqs_train, x_dim=3, bin_width=20.0, min_var_frac=0.01, em_tol=1.0E-8,
     print('\nFitting GPFA model with CNF...')
     params_est, seqs_train_cut, ll_cut, iter_time, cnfs = em(
     params_init, seqs_train_cut, device,min_var_frac=min_var_frac,
-    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnfs=cnfs, cnf_lr=cnf_lr,convergence=convergence,reverse=reverse,save_dir=save_dir,min_convergence_epoch)
+    max_iters=em_max_iters, tol=em_tol, freq_ll=freq_ll, verbose=verbose, cnfs=cnfs, cnf_lr=cnf_lr,convergence=convergence,reverse=reverse,save_dir=save_dir,min_convergence_epoch=min_convergence_epoch)
 
     fit_info = {'iteration_time': iter_time, 'log_likelihoods': ll_cut}
 
@@ -249,6 +249,7 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
     # Correct initialization of CNF optimizers
     cnf_optimizers = [torch.optim.Adam(cnf.parameters(), lr=cnf_lr) for cnf in cnfs]
     converged = False
+    cnf_lls = []
     # Loop once for each iteration of the EM algorithm
     for iter_id in trange(1, max_iters + 1, desc='EM iteration', disable=not verbose):
         if verbose:
@@ -260,7 +261,7 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
             ll_old = ll
         # Exact inference step; ensure it returns updated values appropriately
         seqs_latent, ll, cnfs, delta_log_pys, latent_ll = exact_inference_with_ll(cnfs, seqs_train, params, device, reverse=reverse)
-
+        cnf_lls.append(latent_ll)
         lls.append(ll)
 
         # Now, optimize each CNF with its respective delta_log_py
@@ -279,7 +280,7 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
             # Compute the loss with your given operation
             #loss = mean_squeezed
-            #loss =  - torch.tensor(latent_ll, requires_grad=True) + mean_squeezed
+            #loss =  - torch.tensor(latent_ll, requires_grad=True) 
             loss = mean_squeezed - torch.tensor(latent_ll, requires_grad=True) 
             
             loss.backward(retain_graph=True)  # Backpropagate loss, retaining graph for subsequent CNFs
@@ -288,7 +289,7 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
         if save_dir:
             save_gpfa_confidence_intervals(save_dir,seqs_latent, iter_id)
-            plot_cnf_loss(save_dir,lls,iter_id)
+            plot_cnf_loss(save_dir,cnf_lls,iter_id)
             #transform_and_plot_linear_gaussian(save_dir,cnf,iter_id)
             plot_latent_trajectories(seqs_latent, save_dir, iteration=len(lls), trial_to_plot=0)
 
