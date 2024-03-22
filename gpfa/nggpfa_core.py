@@ -263,7 +263,9 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
         cnf_optimizer.zero_grad()
         seqs_latent, ll, cnf, delta_log_p,latent_ll = exact_inference_with_ll(cnf, seqs_train, params, device, reverse=reverse)
-        loss = torch.tensor(-latent_ll, requires_grad=True) +  torch.mean(delta_log_p.squeeze(-1))
+        #loss = torch.tensor(-latent_ll, requires_grad=True) #+  torch.mean(delta_log_p.squeeze(-1))
+        loss = torch.tensor(-ll - latent_ll, requires_grad=True) #+  torch.mean(delta_log_p.squeeze(-1))
+
         lls.append(ll)
         clip_value = 1.0
         # Apply gradients
@@ -280,16 +282,21 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
 
 
         # ==== M STEP ====
+
         sum_p_auto = np.zeros((x_dim, x_dim))
+    
+
         for seq_latent in seqs_latent:
             sum_p_auto += seq_latent['Vsm'].sum(axis=2) \
                 + seq_latent['latent_variable'].dot(
                 seq_latent['latent_variable'].T)
+        
         y = np.hstack(seqs_train['y'])
         latent_variable = np.hstack(seqs_latent['latent_variable'])
         sum_yxtrans = y.dot(latent_variable.T)
         sum_xall = latent_variable.sum(axis=1)[:, np.newaxis]
         sum_yall = y.sum(axis=1)[:, np.newaxis]
+       
 
         # term is (xDim+1) x (xDim+1)
         term = np.vstack([np.hstack([sum_p_auto, sum_xall]),
@@ -334,7 +341,7 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
         if iter_id % freq_ll:
             print('Iter ID: ',iter_id, 'EM Log Likelihood: ', ll, '\nCNF Log Likelihood: ', latent_ll)
             print('-'*15)
-        if iter_id <= 5: # free parameter to see how early in the fitting to alllow the graph to converge
+        if iter_id <= 20: # free parameter to see how early in the fitting to alllow the graph to converge
             ll_base = ll
         elif verbose and ll < ll_old:
             print('\nError: Data likelihood has decreased ',
@@ -475,19 +482,22 @@ def exact_inference_with_ll(cnf, seqs, params, device,reverse):
         for i, n in enumerate(n_list):
             latent_var_np = latent_variable_mat[:, i].reshape((x_dim, t), order='F')
             latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32).to(device)
-            delta_log_p, _, transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor.T, reverse=reverse)
-            seqs_latent[n]['latent_variable'] = transformed_latent_var_tensor.detach().cpu().numpy().T
+            transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor.T, reverse=reverse).squeeze()
+            seqs_latent[n]['latent_variable'] = transformed_latent_var_tensor.detach().cpu().numpy()
             seqs_latent[n]['Vsm'] = vsm
             seqs_latent[n]['VsmGP'] = vsm_gp
+            delta_log_p = 0
             delta_log_py_list.append(delta_log_p)
 
+            # Perform the operation with the squeezed latent variable
             transformed_dif = seqs_latent[n]['y'] - (params['C'] @ seqs_latent[n]['latent_variable'] + params['d'][:, np.newaxis])
+            #transformed_dif = seqs_latent[n]['y'] - (params['C'] @ seqs_latent[n]['latent_variable'] + params['d'][:, np.newaxis])
             
             # Update LL with transformed 'dif'
             val = -t * logdet_r - logdet_k_big - logdet_m - y_dim * t * np.log(2 * np.pi)
             latent_term_mat = c_rinv.dot(dif).reshape((x_dim * t, -1), order='F')
 
-            latent_ll += len(n_list) * val - (rinv.dot(transformed_dif) * transformed_dif).sum() + (latent_term_mat.T.dot(minv) * latent_term_mat.T).sum()
+            latent_ll += np.abs(len(n_list) * val - (rinv.dot(transformed_dif) * transformed_dif).sum() + (latent_term_mat.T.dot(minv) * latent_term_mat.T).sum())
 
         # Compute data likelihood
         val = -t * logdet_r - logdet_k_big - logdet_m \
@@ -556,11 +566,12 @@ def learn_gp_params(seqs_latent, params, verbose=False):
 
     return param_opt
 
-def apply_flow(cnf, labels,reverse=False):
-    cnf.float()
-    y, delta_log_py = cnf(labels, torch.zeros(labels.size(0), 1).to(labels),reverse=reverse )
-    y = y.squeeze()
-    return delta_log_py, labels, y
+def apply_flow(cnf, inputs, reverse=False):
+    # Apply the CNF transformation to the inputs
+    # This is a placeholder function and should be implemented according to your CNF's API
+    # Should return the transformed inputs and optionally, the log determinant of the Jacobian
+    transformed_inputs = cnf(inputs.unsqueeze(0).T, reverse=reverse)
+    return transformed_inputs.squeeze(0)
     
 
 def orthonormalize(params_est, seqs):

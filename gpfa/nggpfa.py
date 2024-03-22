@@ -210,7 +210,7 @@ class NGGPFA(sklearn.base.BaseEstimator):
         self.transform_info = dict()
         self.save_path_th = '/Users/jessegill/Desktop/nggp/nggp_lib/save/nggp_rbf_5e3/checkpoints/neural/MLP2_NGGP_model.th'
 
-        self.model_params = Namespace(seed=1, model='MLP2', method='NGGP', dataset='neural', update_batch_size=5, meta_batch_size=5, output_dim=self.x_dim, multidimensional_amp=False, multidimensional_phase=False, noise='gaussian', kernel_type='rbf', save_dir='./save/nggp_rbf_5e3', num_tasks=self.x_dim, multi_type=3, method_lr=cnf_lr, feature_extractor_lr=0.001, cnf_lr=0.001, all_lr=0.005, neptune=False, use_conditional=False, context_type='backbone', layer_type='concatsquash', dims='32-32-32', num_blocks=2, time_length=0.5, train_T=False, add_noise=False, divergence_fn='brute_force', nonlinearity='tanh', solver='dopri5', atol=1e-05, rtol=1e-05, step_size=None, test_solver=None, test_atol=None, test_rtol=None, residual=False, rademacher=False, spectral_norm=False, batch_norm=False, bn_lag=0, l1int=None, l2int=None, dl2int=None, JFrobint=None, JdiagFrobint=None, JoffdiagFrobint=None, start_epoch=0, stop_epoch=100, test=False, n_support=5, n_test_epochs=10, out_of_range=False, device=device)
+        self.model_params = Namespace(seed=1, model='MLP2', method='NGGP', dataset='neural', update_batch_size=5, meta_batch_size=5, output_dim=1, multidimensional_amp=False, multidimensional_phase=False, noise='gaussian', kernel_type='rbf', save_dir='./save/nggp_rbf_5e3', num_tasks=self.x_dim, multi_type=3, method_lr=cnf_lr, feature_extractor_lr=0.001, cnf_lr=0.001, all_lr=0.005, neptune=False, use_conditional=False, context_type='backbone', layer_type='concatsquash', dims='32-32-32', num_blocks=2, time_length=0.5, train_T=False, add_noise=False, divergence_fn='brute_force', nonlinearity='tanh', solver='dopri5', atol=1e-05, rtol=1e-05, step_size=None, test_solver=None, test_atol=None, test_rtol=None, residual=False, rademacher=False, spectral_norm=False, batch_norm=False, bn_lag=0, l1int=None, l2int=None, dl2int=None, JFrobint=None, JdiagFrobint=None, JoffdiagFrobint=None, start_epoch=0, stop_epoch=100, test=False, n_support=5, n_test_epochs=10, out_of_range=False, device=device)
         setup_seed(self.model_params)
         config = Config(self.model_params)
         checkpoint_dir, save_path = setup_checkpoint_dir(self.model_params)
@@ -225,26 +225,22 @@ class NGGPFA(sklearn.base.BaseEstimator):
         self.nggp_model = setup_model(self.bb, config, device, self.model_params)
         optimizer = setup_optimizer(self.nggp_model, self.model_params)
         setup_checkpoint_dir(self.model_params)
-        self.cnf = setup_flow(device, self.model_params, self.x_dim)
+        self.cnf = self.setup_flow(context_dim=1)
         if device=='mps':
             torch.set_default_dtype(torch.float32)
 
 
         print("*"*4, "NGGP Model Initiated", "*"*4)
         
-    def setup_flow(self):
-        if self.model_params.use_conditional:
-            cnf = build_conditional_cnf(self.model_params, self.model_params.num_tasks, self.x_dim).to(self.device)
+    def setup_flow(self,use_conditional=False,spectral_norm = False,device='cpu',context_dim=1):
+        if use_conditional:
+            cnf = build_conditional_cnf(self.model_params, 1, context_dim).to(device)
         else:
             regularization_fns, regularization_coeffs = create_regularization_fns(self.model_params)
-            cnf = build_model_tabular(self.model_params, self.model_params.num_tasks, regularization_fns).to(self.device)
-            #cnf = build_model_tabular(params, 5, regularization_fns).to(device)
-
-        if self.model_params.spectral_norm:
+            cnf = build_model_tabular(self.model_params,1, regularization_fns).to(device)
+        if spectral_norm:
             add_spectral_norm(cnf)
         set_cnf_options(self.model_params, cnf)
-        ##
-        ##
         return cnf
 
     def fit(self, spiketrains):
@@ -420,10 +416,8 @@ class NGGPFA(sklearn.base.BaseEstimator):
             raise ValueError("'returned_data' can only have the following "
                              "entries: {}".format(self.valid_data_names))
         seqs = gpfa_util.get_seqs(spiketrains, self.bin_size)
-        print('seqs: ',np.shape(seqs))
         for seq in seqs:
             seq['y'] = seq['y'][self.has_spikes_bool, :]
-        print('seqs2: ', np.shape(seqs))
         seqs, ll, _, _,_ = nggpfa_core.exact_inference_with_ll(self.cnf,seqs,
                                                      self.params_estimated,device=self.device,reverse=self.reverse)
         self.transform_info['log_likelihood'] = ll
