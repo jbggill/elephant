@@ -258,7 +258,6 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
                           np.hstack([sum_xall.T, t.sum().reshape((1, 1))])])
         # yDim x (xDim+1)
         cd = gpfa_util.rdiv(np.hstack([sum_yxtrans, sum_yall]), term)
-
         params['C'] = cd[:, :x_dim]
         params['d'] = cd[:, -1]
 
@@ -294,6 +293,9 @@ def em(params_init, seqs_train, max_iters=500, tol=1.0E-8, min_var_frac=0.01,
         iter_time.append(t_end)
 
         # Verify that likelihood is growing monotonically
+        if ll:
+            print('Iter ID: ',iter_id, 'EM Log Likelihood: ',ll)
+
         if iter_id <= 2:
             ll_base = ll
         elif verbose and ll < ll_old:
@@ -382,7 +384,9 @@ def exact_inference_with_ll(seqs, params, get_ll=True):
     c_rinv_c = c_rinv.dot(params['C'])
     t_all = seqs_latent['T']
     t_uniq = np.unique(t_all)
+
     ll = 0.
+
 
     # Overview:
     # - Outer loop on each element of Tu.
@@ -391,11 +395,12 @@ def exact_inference_with_ll(seqs, params, get_ll=True):
     for t in t_uniq:
         # create the covariance matrix
         k_big, k_big_inv, logdet_k_big = gpfa_util.make_k_big(params, t)
-        k_big = sparse.csr_matrix(k_big)
-        
+        #k_big = sparse.csr_matrix(k_big)
+    
         blah = [c_rinv_c for _ in range(t)]
         c_rinv_c_big = linalg.block_diag(*blah)  # (xDim*T) x (xDim*T)
         minv, logdet_m = gpfa_util.inv_persymm(k_big_inv + c_rinv_c_big, x_dim)
+   
 
         # Note that posterior covariance does not depend on observations,
         # so can compute once for all trials with same T.
@@ -404,7 +409,6 @@ def exact_inference_with_ll(seqs, params, get_ll=True):
         idx = np.arange(0, x_dim * t + 1, x_dim)
         for i in range(t):
             vsm[:, :, i] = minv[idx[i]:idx[i + 1], idx[i]:idx[i + 1]]
-
         # T x T posterior covariance for each GP
         vsm_gp = np.full((t, t, x_dim), np.nan)
         for i in range(x_dim):
@@ -412,14 +416,17 @@ def exact_inference_with_ll(seqs, params, get_ll=True):
 
         # Process all trials with length T
         n_list = np.where(t_all == t)[0]
+
         # dif is yDim x sum(T)
         dif = np.hstack(seqs_latent[n_list]['y']) - params['d'][:, np.newaxis]
         # term1Mat is (xDim*T) x length(nList)
+        #### LEFT OFF HERE ####
         term1_mat = c_rinv.dot(dif).reshape((x_dim * t, -1), order='F')
 
         # Compute blkProd = CRinvC_big * invM efficiently
         # blkProd is block persymmetric, so just compute top half
         t_half = int(np.ceil(t / 2.0))
+
         blk_prod = np.zeros((x_dim * t_half, x_dim * t))
         idx = range(0, x_dim * t_half + 1, x_dim)
         for i in range(t_half):
@@ -428,10 +435,11 @@ def exact_inference_with_ll(seqs, params, get_ll=True):
         blk_prod = k_big[:x_dim * t_half, :].dot(
             gpfa_util.fill_persymm(np.eye(x_dim * t_half, x_dim * t) -
                                    blk_prod, x_dim, t))
+      
         # latent_variableMat is (xDim*T) x length(nList)
         latent_variable_mat = gpfa_util.fill_persymm(
             blk_prod, x_dim, t).dot(term1_mat)
-
+        print(latent_variable_mat)
         for i, n in enumerate(n_list):
             seqs_latent[n]['latent_variable'] = \
                 latent_variable_mat[:, i].reshape((x_dim, t), order='F')
@@ -572,9 +580,7 @@ import matplotlib.pyplot as plt
 def save_gpfa_confidence_intervals(seqs_latent, iteration, save_dir='gpfa_plots'):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
-    print(seqs_latent)
     for trial_idx, trial_data in enumerate(seqs_latent):
-        print(trial_data)
         # Assuming each trial_data contains means and variances for each latent variable
         for latent_variable_idx in range(trial_data['latent_variable'].shape[0]):
             means = trial_data['latent_variable'][latent_variable_idx, :]

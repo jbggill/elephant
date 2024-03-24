@@ -228,13 +228,6 @@ def make_k_big(params, n_timesteps):
                                             Tdif ** 2) \
             + params['eps'][i] * np.eye(n_timesteps)
         K_big[i::xDim, i::xDim] = K
-        # the original MATLAB program uses here a special algorithm, provided
-        # in C and MEX, for inversion of Toeplitz matrix:
-        # [K_big_inv(idx+i, idx+i), logdet_K] = invToeplitz(K);
-        # TODO: use an inversion method optimized for Toeplitz matrix
-        # Below is an attempt to use such a method, not leading to a speed-up.
-        # # K_big_inv[i::xDim, i::xDim] = sp.linalg.solve_toeplitz((K[:, 0],
-        # K[0, :]), np.eye(T))
         K_big_inv[i::xDim, i::xDim] = np.linalg.inv(K)
         logdet_K = logdet(K)
 

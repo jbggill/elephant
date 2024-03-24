@@ -297,7 +297,9 @@ def em(params_init, seqs_train, device,max_iters=500, tol=1.0E-8, min_var_frac=0
         sum_xall = latent_variable.sum(axis=1)[:, np.newaxis]
         sum_yall = y.sum(axis=1)[:, np.newaxis]
        
-
+        print("sum_p_auto shape:", sum_p_auto.shape)
+        print("sum_xall shape:", sum_xall.shape)
+        print('t.sum shape:', t.sum().reshape(1,1))
         # term is (xDim+1) x (xDim+1)
         term = np.vstack([np.hstack([sum_p_auto, sum_xall]),
                           np.hstack([sum_xall.T, t.sum().reshape((1, 1))])])
@@ -434,6 +436,7 @@ def exact_inference_with_ll(cnf, seqs, params, device,reverse):
     # - Outer loop on each element of Tu.
     # - For each element of Tu, find all trials with that length.
     # - Do inference and LL computation for all those trials together.
+    total_delta_log_p = 0
     for t in t_uniq:
         # create the covariance matrix
         k_big, k_big_inv, logdet_k_big = gpfa_util.make_k_big(params, t)
@@ -477,27 +480,29 @@ def exact_inference_with_ll(cnf, seqs, params, device,reverse):
         # latent_variableMat is (xDim*T) x length(nList)
         latent_variable_mat = gpfa_util.fill_persymm(
             blk_prod, x_dim, t).dot(term1_mat)
-        latent_ll = 0
-        delta_log_py_list = []
+
         for i, n in enumerate(n_list):
             latent_var_np = latent_variable_mat[:, i].reshape((x_dim, t), order='F')
             latent_var_tensor = torch.tensor(latent_var_np, dtype=torch.float32).to(device)
-            transformed_latent_var_tensor = apply_flow(cnf, latent_var_tensor.T, reverse=reverse).squeeze()
+            #tent_var_tensor = apply_flow(cnf, latent_var_tensor.T, reverse=reverse).squeeze()
+            transformed_latent_var_tensor,delta_log_p = apply_flow(cnf, latent_var_tensor.T, reverse=reverse)
+            print(transformed_latent_var_tensor.shape)
+            #transformed_latent_var_tensor= apply_flow(cnf, latent_var_tensor.T, reverse=reverse)
+
+            transformed_latent_var_tensor = transformed_latent_var_tensor.squeeze(0).T
             seqs_latent[n]['latent_variable'] = transformed_latent_var_tensor.detach().cpu().numpy()
             seqs_latent[n]['Vsm'] = vsm
             seqs_latent[n]['VsmGP'] = vsm_gp
-            delta_log_p = 0
-            delta_log_py_list.append(delta_log_p)
+            total_delta_log_p += delta_log_p.sum()
 
             # Perform the operation with the squeezed latent variable
-            transformed_dif = seqs_latent[n]['y'] - (params['C'] @ seqs_latent[n]['latent_variable'] + params['d'][:, np.newaxis])
             #transformed_dif = seqs_latent[n]['y'] - (params['C'] @ seqs_latent[n]['latent_variable'] + params['d'][:, np.newaxis])
             
             # Update LL with transformed 'dif'
             val = -t * logdet_r - logdet_k_big - logdet_m - y_dim * t * np.log(2 * np.pi)
-            latent_term_mat = c_rinv.dot(dif).reshape((x_dim * t, -1), order='F')
+            #latent_term_mat = c_rinv.dot(dif).reshape((x_dim * t, -1), order='F')
 
-            latent_ll += np.abs(len(n_list) * val - (rinv.dot(transformed_dif) * transformed_dif).sum() + (latent_term_mat.T.dot(minv) * latent_term_mat.T).sum())
+            #latent_ll += len(n_list) * val - (rinv.dot(transformed_dif) * transformed_dif).sum() + (latent_term_mat.T.dot(minv) * latent_term_mat.T).sum()
 
         # Compute data likelihood
         val = -t * logdet_r - logdet_k_big - logdet_m \
@@ -506,10 +511,10 @@ def exact_inference_with_ll(cnf, seqs, params, device,reverse):
             + (term1_mat.T.dot(minv) * term1_mat.T).sum()
 
 
-    ll /= 2
+    #ll /= 2
 
 
-    return seqs_latent, ll, cnf, delta_log_p,latent_ll
+    return seqs_latent, ll, cnf, total_delta_log_p,0
  
 
 
@@ -565,14 +570,22 @@ def learn_gp_params(seqs_latent, params, verbose=False):
             print('\n Converged p; xDim:{}, p:{}'.format(i, res_opt.x))
 
     return param_opt
-
+'''
 def apply_flow(cnf, inputs, reverse=False):
     # Apply the CNF transformation to the inputs
     # This is a placeholder function and should be implemented according to your CNF's API
     # Should return the transformed inputs and optionally, the log determinant of the Jacobian
     transformed_inputs = cnf(inputs.unsqueeze(0).T, reverse=reverse)
     return transformed_inputs.squeeze(0)
-    
+'''
+def apply_flow(cnf, inputs, reverse=False):
+    # Apply the CNF transformation to the inputs
+    # Ensure it returns both transformed inputs and logpz
+    print(inputs.shape)
+    transformed_inputs, logpz = cnf(inputs, torch.zeros(inputs.size(), device=inputs.device), reverse=reverse)
+    print(transformed_inputs.shape, logpz.shape)
+    return transformed_inputs, logpz.squeeze(1)  # Adjust dimensions as necessary
+
 
 def orthonormalize(params_est, seqs):
     """
