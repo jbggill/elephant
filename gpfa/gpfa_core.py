@@ -368,6 +368,7 @@ def exact_inference_with_ll(seqs, params, get_ll=True):
     dtype_out.extend([('latent_variable', object), ('Vsm', object),
                       ('VsmGP', object)])
     seqs_latent = np.empty(len(seqs), dtype=dtype_out)
+
     for dtype_name in seqs.dtype.names:
         seqs_latent[dtype_name] = seqs[dtype_name]
 
@@ -382,6 +383,7 @@ def exact_inference_with_ll(seqs, params, get_ll=True):
 
     c_rinv = params['C'].T.dot(rinv)
     c_rinv_c = c_rinv.dot(params['C'])
+    
     t_all = seqs_latent['T']
     t_uniq = np.unique(t_all)
 
@@ -417,12 +419,12 @@ def exact_inference_with_ll(seqs, params, get_ll=True):
         # Process all trials with length T
         n_list = np.where(t_all == t)[0]
 
-        # dif is yDim x sum(T)
+
+
         dif = np.hstack(seqs_latent[n_list]['y']) - params['d'][:, np.newaxis]
         # term1Mat is (xDim*T) x length(nList)
-        #### LEFT OFF HERE ####
-        term1_mat = c_rinv.dot(dif).reshape((x_dim * t, -1), order='F')
 
+        term1_mat = c_rinv.dot(dif).reshape((x_dim * t, -1), order='F')
         # Compute blkProd = CRinvC_big * invM efficiently
         # blkProd is block persymmetric, so just compute top half
         t_half = int(np.ceil(t / 2.0))
@@ -439,7 +441,6 @@ def exact_inference_with_ll(seqs, params, get_ll=True):
         # latent_variableMat is (xDim*T) x length(nList)
         latent_variable_mat = gpfa_util.fill_persymm(
             blk_prod, x_dim, t).dot(term1_mat)
-        print(latent_variable_mat)
         for i, n in enumerate(n_list):
             seqs_latent[n]['latent_variable'] = \
                 latent_variable_mat[:, i].reshape((x_dim, t), order='F')

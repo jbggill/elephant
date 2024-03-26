@@ -149,3 +149,57 @@ def make_k_big_torch(params, n_timesteps):
 
 
 # Note: Further adaptations may be necessary depending on specific usage within your code.
+
+
+import torch
+import numpy as np
+import quantities as pq
+from elephant.conversion import BinnedSpikeTrain
+
+def get_seqs_torch(data, bin_size, use_sqrt=True, device='cpu'):
+    """
+    Converts the data into sequences with tensor format.
+
+    Parameters
+    ----------
+    data : list of list of neo.SpikeTrain
+        The outer list corresponds to trials and the inner list corresponds to
+        the neurons recorded in that trial.
+    bin_size: quantity.Quantity
+        Spike bin width
+    use_sqrt: bool
+        Whether to use square-root transform on spike counts.
+    device: str
+        The device to store the tensors on ('cpu' or 'cuda').
+
+    Returns
+    -------
+    seqs : list of dict
+        List of dictionaries, each corresponding to a trial. Each dictionary
+        has keys 'T' for number of timesteps and 'y' for neural data tensor.
+    """
+    if not isinstance(bin_size, pq.Quantity):
+        raise ValueError("'bin_size' must be of type pq.Quantity")
+
+    seqs = []
+    for trial in data:
+        sts = trial
+        binned_spiketrain = BinnedSpikeTrain(sts, bin_size=bin_size)
+        if use_sqrt:
+            binned = np.sqrt(binned_spiketrain.to_array())
+        else:
+            binned = binned_spiketrain.to_array()
+        
+        # Convert binned data to tensor
+        binned_tensor = torch.tensor(binned, dtype=torch.float32, device=device)
+        
+        # Append to sequences list
+        seqs.append({
+            'T': binned_spiketrain.n_bins,
+            'y': binned_tensor
+        })
+
+    # Optionally filter out trials shorter than one bin width
+    seqs = [seq for seq in seqs if seq['T'] > 0]
+
+    return seqs
